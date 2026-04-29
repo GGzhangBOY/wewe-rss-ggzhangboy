@@ -87,6 +87,7 @@ export class TrpcRouter {
           token: z.string().min(1),
           name: z.string().min(1),
           status: z.number().default(statusMap.ENABLE),
+          category: z.string().optional().default(''),
         }),
       )
       .mutation(async ({ input }) => {
@@ -110,6 +111,7 @@ export class TrpcRouter {
             token: z.string().min(1).optional(),
             name: z.string().min(1).optional(),
             status: z.number().optional(),
+            category: z.string().optional(),
           }),
         }),
       )
@@ -197,6 +199,7 @@ export class TrpcRouter {
             .default(Math.floor(Date.now() / 1e3)),
           updateTime: z.number(),
           status: z.number().default(statusMap.ENABLE),
+          category: z.string().optional().default(''),
         }),
       )
       .mutation(async ({ input }) => {
@@ -222,6 +225,7 @@ export class TrpcRouter {
             syncTime: z.number().optional(),
             updateTime: z.number().optional(),
             status: z.number().optional(),
+            category: z.string().optional(),
           }),
         }),
       )
