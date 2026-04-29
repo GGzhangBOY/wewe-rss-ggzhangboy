@@ -15,6 +15,8 @@ import {
   Tooltip,
   useDisclosure,
   Link,
+  Select,
+  SelectItem,
 } from '@nextui-org/react';
 import { PlusIcon } from '@web/components/PlusIcon';
 import { trpc } from '@web/utils/trpc';
@@ -70,6 +72,7 @@ const Feeds = () => {
   const [wxsLink, setWxsLink] = useState('');
 
   const [currentMpId, setCurrentMpId] = useState(id || '');
+  const [categoryFilter, setCategoryFilter] = useState('all');
 
   const handleConfirm = async () => {
     console.log('wxsLink', wxsLink);
@@ -109,6 +112,32 @@ const Feeds = () => {
   const currentMpInfo = useMemo(() => {
     return feedData?.items.find((item) => item.id === currentMpId);
   }, [currentMpId, feedData?.items]);
+
+  const categoryOptions = useMemo(() => {
+    const set = new Set<string>();
+    (feedData?.items || []).forEach((item) => set.add(item.category || '未分类'));
+    return ['all', ...Array.from(set)];
+  }, [feedData?.items]);
+
+  const filteredFeedItems = useMemo(() => {
+    if (!feedData?.items) return [];
+    if (categoryFilter === 'all') return feedData.items;
+    return feedData.items.filter(
+      (item) => (item.category || '未分类') === categoryFilter,
+    );
+  }, [categoryFilter, feedData?.items]);
+
+  const handleSetCategory = async (item) => {
+    const current = item.category || '';
+    const category = window.prompt('设置分类（留空为未分类）', current);
+    if (category === null) return;
+    await updateMpInfo({
+      id: item.id,
+      data: { category: category.trim() },
+    });
+    toast.success('分类已更新');
+    await refetchFeedList();
+  };
 
   const handleExportOpml = async (ev) => {
     ev.preventDefault();
@@ -159,6 +188,22 @@ const Feeds = () => {
               共{feedData?.items.length || 0}个订阅
             </div>
           </div>
+          <div className="pb-3">
+            <Select
+              size="sm"
+              label="分类筛选"
+              selectedKeys={[categoryFilter]}
+              onSelectionChange={(keys) =>
+                setCategoryFilter(Array.from(keys)[0] as string)
+              }
+            >
+              {categoryOptions.map((category) => (
+                <SelectItem key={category}>
+                  {category === 'all' ? '全部分类' : category}
+                </SelectItem>
+              ))}
+            </Select>
+          </div>
 
           {feedData?.items ? (
             <Listbox
@@ -178,7 +223,7 @@ const Feeds = () => {
               </ListboxSection>
 
               <ListboxSection className="overflow-y-auto h-[calc(100vh-260px)]">
-                {feedData?.items.map((item) => {
+                {filteredFeedItems.map((item) => {
                   return (
                     <ListboxItem
                       href={`/feeds/${item.id}`}
@@ -187,8 +232,13 @@ const Feeds = () => {
                       }
                       key={item.id}
                       startContent={<Avatar src={item.mpCover}></Avatar>}
+                      endContent={
+                        <Button size="sm" variant="light" onClick={() => {
+                          handleSetCategory(item);
+                        }}>分类</Button>
+                      }
                     >
-                      {item.mpName}
+                      {item.mpName} {(item.category || "未分类") && (<span className="text-xs text-default-400">[{item.category || "未分类"}]</span>)}
                     </ListboxItem>
                   );
                 }) || []}

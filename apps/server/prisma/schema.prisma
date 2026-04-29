@@ -42,6 +42,9 @@ model Feed {
   // 是否有历史文章 1 是  0 否
   hasHistory Int? @default(1) @map("has_history")
 
+  // 用户自定义分类
+  category String @default("") @map("category") @db.VarChar(255)
+
   @@map("feeds")
 }
 
