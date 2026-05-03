@@ -5,7 +5,7 @@ import { ConfigurationType } from '@server/configuration';
 import axios from 'axios';
 import got from 'got';
 import { load } from 'cheerio';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 
 type RagChunk = {
   id: string;
@@ -25,6 +25,32 @@ type RagChunk = {
 type ChatHistoryMessage = {
   role: 'user' | 'assistant';
   content: string;
+};
+
+type ArticleContent = {
+  article_id: string;
+  content: string;
+  content_html: string;
+  content_length: number;
+  fetch_status: string;
+  fail_reason: string;
+  fetched_at: string;
+  updated_at: string;
+};
+
+type ArticleContentJob = {
+  id: string;
+  article_id: string;
+  source_url: string;
+  title: string;
+  category: string;
+  status: string;
+  attempts: number;
+  fail_reason: string;
+  locked_by: string;
+  locked_at: string;
+  created_at: string;
+  updated_at: string;
 };
 
 const VECTOR_DIMS = 384;
@@ -67,6 +93,52 @@ export class RagService {
     await this.prismaService.$executeRawUnsafe(
       `CREATE INDEX IF NOT EXISTS idx_rag_chunks_published_at ON rag_chunks(published_at)`,
     );
+    await this.ensureContentSchema();
+  }
+
+  async ensureContentSchema() {
+    await this.prismaService.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS article_contents (
+        article_id TEXT PRIMARY KEY,
+        source_url TEXT NOT NULL,
+        title TEXT NOT NULL,
+        author TEXT NOT NULL DEFAULT '',
+        content TEXT NOT NULL,
+        content_html TEXT NOT NULL DEFAULT '',
+        content_length INTEGER NOT NULL DEFAULT 0,
+        fetch_status TEXT NOT NULL,
+        fail_reason TEXT NOT NULL DEFAULT '',
+        fetched_by TEXT NOT NULL DEFAULT '',
+        fetched_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    await this.prismaService.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS idx_article_contents_status ON article_contents(fetch_status)`,
+    );
+    await this.prismaService.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS article_content_jobs (
+        id TEXT PRIMARY KEY,
+        article_id TEXT NOT NULL,
+        source_url TEXT NOT NULL,
+        title TEXT NOT NULL,
+        category TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        fail_reason TEXT NOT NULL DEFAULT '',
+        locked_by TEXT NOT NULL DEFAULT '',
+        locked_at TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    await this.prismaService.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS idx_article_content_jobs_status ON article_content_jobs(status)`,
+    );
+    await this.prismaService.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS idx_article_content_jobs_article_id ON article_content_jobs(article_id)`,
+    );
   }
 
   async reindex({
@@ -101,6 +173,9 @@ export class RagService {
       where: filteredFeedIds ? { mpId: { in: filteredFeedIds } } : undefined,
       orderBy: { publishTime: 'desc' },
     });
+    const contents = await this.getArticleContentMap(
+      articles.map((article) => article.id),
+    );
 
     let indexedArticles = 0;
     let indexedChunks = 0;
@@ -110,15 +185,11 @@ export class RagService {
       const mpName = feed?.mpName || article.mpId;
       const feedCategory = feed?.category || '未分类';
       const sourceUrl = `https://mp.weixin.qq.com/s/${article.id}`;
-      const fetchedBody = includeFullText
-        ? await this.fetchArticleText(sourceUrl).catch((err) => {
-            this.logger.warn(
-              `fetch article text failed: ${article.id}, ${err.message}`,
-            );
-            return '';
-          })
-        : '';
-      const body = this.isInvalidArticleText(fetchedBody) ? '' : fetchedBody;
+      const storedContent = contents.get(article.id);
+      const body =
+        includeFullText && storedContent?.fetch_status === 'success'
+          ? storedContent.content
+          : '';
 
       const baseContent = [
         `标题：${article.title}`,
@@ -180,13 +251,26 @@ export class RagService {
     category,
     limit = 8,
     history = [],
+    useKnowledgeBase = true,
   }: {
     question: string;
     category?: string;
     limit?: number;
     history?: ChatHistoryMessage[];
+    useKnowledgeBase?: boolean;
   }) {
     await this.ensureSchema();
+    if (!useKnowledgeBase) {
+      const answer = await this.callMiniMax(question, [], history, {
+        useKnowledgeBase: false,
+      });
+      return {
+        answer,
+        sources: [],
+        useKnowledgeBase: false,
+      };
+    }
+
     const searchText = this.buildSearchText(question, history);
     const chunks = await this.search(searchText, { category, limit });
 
@@ -195,10 +279,13 @@ export class RagService {
         answer:
           '当前知识库还没有可用于回答的公众号内容。请先执行知识库索引。',
         sources: [],
+        useKnowledgeBase: true,
       };
     }
 
-    const answer = await this.callMiniMax(question, chunks, history);
+    const answer = await this.callMiniMax(question, chunks, history, {
+      useKnowledgeBase: true,
+    });
     return {
       answer,
       sources: chunks.map((chunk) => ({
@@ -210,6 +297,7 @@ export class RagService {
         score: chunk.score || 0,
         excerpt: chunk.content.slice(0, 280),
       })),
+      useKnowledgeBase: true,
     };
   }
 
@@ -230,8 +318,382 @@ export class RagService {
     };
   }
 
+  async createContentJobs({
+    limit = 30,
+    category,
+    onlyMissingContent = true,
+  }: {
+    limit?: number;
+    category?: string;
+    onlyMissingContent?: boolean;
+  }) {
+    await this.ensureSchema();
+    const feeds = await this.prismaService.feed.findMany();
+    const feedMap = new Map(feeds.map((feed) => [feed.id, feed]));
+    const filteredFeedIds = category
+      ? feeds
+          .filter((feed) => (feed.category || '未分类') === category)
+          .map((feed) => feed.id)
+      : undefined;
+    const articles = await this.prismaService.article.findMany({
+      take: limit,
+      where: filteredFeedIds ? { mpId: { in: filteredFeedIds } } : undefined,
+      orderBy: { publishTime: 'desc' },
+    });
+
+    const contentMap = await this.getArticleContentMap(
+      articles.map((article) => article.id),
+    );
+    const existingJobs = await this.prismaService.$queryRawUnsafe<
+      ArticleContentJob[]
+    >(
+      `SELECT * FROM article_content_jobs ORDER BY article_id ASC, updated_at DESC`,
+    );
+    const latestJobMap = new Map<string, ArticleContentJob>();
+    for (const job of existingJobs) {
+      if (!latestJobMap.has(job.article_id)) {
+        latestJobMap.set(job.article_id, job);
+      }
+    }
+    const now = new Date().toISOString();
+    let created = 0;
+    let reused = 0;
+    let skipped = 0;
+
+    for (const article of articles) {
+      const content = contentMap.get(article.id);
+      if (
+        onlyMissingContent &&
+        content?.fetch_status === 'success' &&
+        content.content_length > 0
+      ) {
+        skipped += 1;
+        continue;
+      }
+      const feed = feedMap.get(article.mpId);
+      const sourceUrl = `https://mp.weixin.qq.com/s/${article.id}`;
+      const feedCategory = feed?.category || '未分类';
+      const existingJob = latestJobMap.get(article.id);
+      if (existingJob) {
+        if (['pending', 'running'].includes(existingJob.status)) {
+          skipped += 1;
+          continue;
+        }
+
+        await this.prismaService.$executeRawUnsafe(
+          `
+            UPDATE article_content_jobs
+            SET source_url = ?,
+                title = ?,
+                category = ?,
+                status = 'pending',
+                fail_reason = '',
+                locked_by = '',
+                locked_at = '',
+                updated_at = ?
+            WHERE id = ?
+          `,
+          sourceUrl,
+          article.title,
+          feedCategory,
+          now,
+          existingJob.id,
+        );
+        latestJobMap.set(article.id, {
+          ...existingJob,
+          source_url: sourceUrl,
+          title: article.title,
+          category: feedCategory,
+          status: 'pending',
+          fail_reason: '',
+          locked_by: '',
+          locked_at: '',
+          updated_at: now,
+        });
+        reused += 1;
+        continue;
+      }
+
+      const jobId = randomUUID();
+      await this.prismaService.$executeRawUnsafe(
+        `
+          INSERT INTO article_content_jobs (
+            id, article_id, source_url, title, category, status,
+            attempts, fail_reason, locked_by, locked_at, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, 'pending', 0, '', '', '', ?, ?)
+        `,
+        jobId,
+        article.id,
+        sourceUrl,
+        article.title,
+        feedCategory,
+        now,
+        now,
+      );
+      latestJobMap.set(article.id, {
+        id: jobId,
+        article_id: article.id,
+        source_url: sourceUrl,
+        title: article.title,
+        category: feedCategory,
+        status: 'pending',
+        attempts: 0,
+        fail_reason: '',
+        locked_by: '',
+        locked_at: '',
+        created_at: now,
+        updated_at: now,
+      });
+      created += 1;
+    }
+
+    return { created, reused, skipped, totalCandidates: articles.length };
+  }
+
+  async claimContentJob({ collectorId }: { collectorId: string }) {
+    await this.ensureSchema();
+    await this.releaseStaleContentJobs();
+    const now = new Date();
+
+    const rows = await this.prismaService.$queryRawUnsafe<ArticleContentJob[]>(
+      `
+        SELECT * FROM article_content_jobs
+        WHERE status = 'pending'
+        ORDER BY created_at ASC
+        LIMIT 1
+      `,
+    );
+    const job = rows[0];
+    if (!job) {
+      return null;
+    }
+
+    await this.prismaService.$executeRawUnsafe(
+      `
+        UPDATE article_content_jobs
+        SET status = 'running',
+            attempts = attempts + 1,
+            locked_by = ?,
+            locked_at = ?,
+            updated_at = ?
+        WHERE id = ?
+      `,
+      collectorId,
+      now.toISOString(),
+      now.toISOString(),
+      job.id,
+    );
+
+    return {
+      jobId: job.id,
+      articleId: job.article_id,
+      sourceUrl: job.source_url,
+      title: job.title,
+      category: job.category,
+    };
+  }
+
+  async submitArticleContent({
+    jobId,
+    articleId,
+    title,
+    author = '',
+    content,
+    contentHtml = '',
+    contentLength,
+    collectorId,
+  }: {
+    jobId: string;
+    articleId: string;
+    title: string;
+    author?: string;
+    content: string;
+    contentHtml?: string;
+    contentLength?: number;
+    collectorId: string;
+  }) {
+    await this.ensureSchema();
+    const now = new Date().toISOString();
+    const normalized = this.normalizeText(content);
+    const length = contentLength ?? normalized.length;
+    const status =
+      !normalized || this.isInvalidArticleText(normalized) || length < 80
+        ? 'empty'
+        : 'success';
+    const failReason = status === 'success' ? '' : '正文为空或长度过短';
+
+    await this.prismaService.$executeRawUnsafe(
+      `
+        INSERT INTO article_contents (
+          article_id, source_url, title, author, content, content_html,
+          content_length, fetch_status, fail_reason, fetched_by,
+          fetched_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(article_id) DO UPDATE SET
+          source_url = excluded.source_url,
+          title = excluded.title,
+          author = excluded.author,
+          content = excluded.content,
+          content_html = excluded.content_html,
+          content_length = excluded.content_length,
+          fetch_status = excluded.fetch_status,
+          fail_reason = excluded.fail_reason,
+          fetched_by = excluded.fetched_by,
+          fetched_at = excluded.fetched_at,
+          updated_at = excluded.updated_at
+      `,
+      articleId,
+      `https://mp.weixin.qq.com/s/${articleId}`,
+      title,
+      author,
+      normalized,
+      contentHtml || '',
+      length,
+      status,
+      failReason,
+      collectorId,
+      now,
+      now,
+      now,
+    );
+
+    await this.prismaService.$executeRawUnsafe(
+      `
+        UPDATE article_content_jobs
+        SET status = ?, fail_reason = ?, updated_at = ?
+        WHERE id = ?
+      `,
+      status === 'success' ? 'success' : 'failed',
+      failReason,
+      now,
+      jobId,
+    );
+
+    return { articleId, status, contentLength: length };
+  }
+
+  async failContentJob({
+    jobId,
+    articleId,
+    status,
+    reason,
+    collectorId,
+  }: {
+    jobId: string;
+    articleId: string;
+    status: 'failed' | 'verify_required' | 'empty';
+    reason: string;
+    collectorId: string;
+  }) {
+    await this.ensureSchema();
+    const now = new Date().toISOString();
+    const normalizedStatus = ['failed', 'verify_required', 'empty'].includes(status)
+      ? status
+      : 'failed';
+
+    await this.prismaService.$executeRawUnsafe(
+      `
+        INSERT INTO article_contents (
+          article_id, source_url, title, author, content, content_html,
+          content_length, fetch_status, fail_reason, fetched_by,
+          fetched_at, created_at, updated_at
+        ) VALUES (?, ?, '', '', '', '', 0, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(article_id) DO UPDATE SET
+          fetch_status = excluded.fetch_status,
+          fail_reason = excluded.fail_reason,
+          fetched_by = excluded.fetched_by,
+          fetched_at = excluded.fetched_at,
+          updated_at = excluded.updated_at
+      `,
+      articleId,
+      `https://mp.weixin.qq.com/s/${articleId}`,
+      normalizedStatus,
+      reason,
+      collectorId,
+      now,
+      now,
+      now,
+    );
+
+    await this.prismaService.$executeRawUnsafe(
+      `
+        UPDATE article_content_jobs
+        SET status = ?, fail_reason = ?, updated_at = ?
+        WHERE id = ?
+      `,
+      normalizedStatus,
+      reason,
+      now,
+      jobId,
+    );
+
+    return { articleId, status: normalizedStatus, reason };
+  }
+
+  async contentJobStats() {
+    await this.ensureSchema();
+    await this.releaseStaleContentJobs();
+    const jobRows = await this.prismaService.$queryRawUnsafe<
+      ArticleContentJob[]
+    >(
+      `SELECT * FROM article_content_jobs ORDER BY article_id ASC, updated_at DESC`,
+    );
+    const contents = await this.prismaService.$queryRawUnsafe<
+      Array<{ fetch_status: string; count: bigint | number }>
+    >(
+      `SELECT fetch_status, COUNT(*) as count FROM article_contents GROUP BY fetch_status`,
+    );
+
+    const latestByArticle = new Map<string, ArticleContentJob>();
+    const failedCounts = new Map<string, number>();
+    for (const job of jobRows) {
+      if (!latestByArticle.has(job.article_id)) {
+        latestByArticle.set(job.article_id, job);
+      }
+      if (['failed', 'verify_required', 'empty'].includes(job.status)) {
+        failedCounts.set(
+          job.article_id,
+          (failedCounts.get(job.article_id) || 0) + 1,
+        );
+      }
+    }
+
+    const statusCounts = new Map<string, number>();
+    for (const job of latestByArticle.values()) {
+      statusCounts.set(job.status, (statusCounts.get(job.status) || 0) + 1);
+    }
+
+    const failedDetails = Array.from(latestByArticle.values())
+      .filter((job) => ['failed', 'verify_required', 'empty'].includes(job.status))
+      .map((job) => ({
+        articleId: job.article_id,
+        title: job.title,
+        category: job.category,
+        status: job.status,
+        failReason: job.fail_reason || '',
+        failedCount: failedCounts.get(job.article_id) || 1,
+        attempts: Number(job.attempts || 0),
+        sourceUrl: job.source_url || `https://mp.weixin.qq.com/s/${job.article_id}`,
+        updatedAt: job.updated_at,
+      }))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+
+    return {
+      jobs: Array.from(statusCounts.entries()).map(([status, count]) => ({
+        status,
+        count,
+      })),
+      contents: contents.map((row) => ({
+        status: row.fetch_status,
+        count: Number(row.count),
+      })),
+      failedDetails,
+    };
+  }
+
   async dashboard({ articleLimit = 30 }: { articleLimit?: number } = {}) {
     await this.ensureSchema();
+    await this.releaseStaleContentJobs();
 
     const feeds = await this.prismaService.feed.findMany();
     const articles = await this.prismaService.article.findMany({
@@ -267,9 +729,15 @@ export class RagService {
       FROM rag_chunks
       GROUP BY article_id
     `);
+    const contents = await this.prismaService.$queryRawUnsafe<ArticleContent[]>(
+      `SELECT * FROM article_contents`,
+    );
 
     const feedMap = new Map(feeds.map((feed) => [feed.id, feed]));
     const chunkMap = new Map(chunks.map((chunk) => [chunk.article_id, chunk]));
+    const contentMap = new Map(
+      contents.map((content) => [content.article_id, content]),
+    );
     const categories = new Map<
       string,
       {
@@ -313,6 +781,7 @@ export class RagService {
       const category = feed?.category || '未分类';
       const bucket = ensureCategory(category);
       const chunk = chunkMap.get(article.id);
+      const storedContent = contentMap.get(article.id);
       bucket.articleCount += 1;
       bucket.latestPublishedAt = Math.max(
         bucket.latestPublishedAt,
@@ -329,7 +798,7 @@ export class RagService {
             ? chunk.updated_at
             : bucket.latestIndexedAt;
 
-        if (this.hasFullTextContent(chunk.content)) {
+        if (storedContent?.fetch_status === 'success') {
           bucket.fullTextArticleCount += 1;
         } else if (contentLength > 0) {
           bucket.titleOnlyArticleCount += 1;
@@ -341,8 +810,8 @@ export class RagService {
 
     const totalArticles = articles.length;
     const indexedArticles = chunks.length;
-    const fullTextArticles = chunks.filter((chunk) =>
-      this.hasFullTextContent(chunk.content),
+    const fullTextArticles = contents.filter(
+      (content) => content.fetch_status === 'success',
     ).length;
     const titleOnlyArticles = chunks.filter(
       (chunk) =>
@@ -353,8 +822,9 @@ export class RagService {
     const recentArticles = articles.slice(0, articleLimit).map((article) => {
       const feed = feedMap.get(article.mpId);
       const chunk = chunkMap.get(article.id);
+      const storedContent = contentMap.get(article.id);
       const contentLength = Number(chunk?.content_length || 0);
-      const hasFullText = chunk ? this.hasFullTextContent(chunk.content) : false;
+      const hasFullText = storedContent?.fetch_status === 'success';
 
       return {
         id: article.id,
@@ -364,9 +834,11 @@ export class RagService {
         publishedAt: article.publishTime,
         indexed: Boolean(chunk),
         hasFullText,
-        contentLength,
+        contentLength: Number(storedContent?.content_length || contentLength),
         chunkCount: Number(chunk?.chunk_count || 0),
         indexedAt: chunk?.updated_at || '',
+        contentStatus: storedContent?.fetch_status || 'missing',
+        failReason: storedContent?.fail_reason || '',
         status: !chunk ? '未索引' : hasFullText ? '有正文' : '仅标题',
         sourceUrl: `https://mp.weixin.qq.com/s/${article.id}`,
       };
@@ -426,6 +898,36 @@ export class RagService {
       }))
       .sort((a, b) => (b.score || 0) - (a.score || 0))
       .slice(0, limit);
+  }
+
+  private async getArticleContentMap(articleIds: string[]) {
+    if (!articleIds.length) {
+      return new Map<string, ArticleContent>();
+    }
+    const placeholders = articleIds.map(() => '?').join(',');
+    const rows = await this.prismaService.$queryRawUnsafe<ArticleContent[]>(
+      `SELECT * FROM article_contents WHERE article_id IN (${placeholders})`,
+      ...articleIds,
+    );
+    return new Map(rows.map((row) => [row.article_id, row]));
+  }
+
+  private async releaseStaleContentJobs() {
+    const now = new Date();
+    const stale = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
+    await this.prismaService.$executeRawUnsafe(
+      `
+        UPDATE article_content_jobs
+        SET status = 'pending',
+            locked_by = '',
+            locked_at = '',
+            fail_reason = 'running task expired and was released',
+            updated_at = ?
+        WHERE status = 'running' AND locked_at < ?
+      `,
+      now.toISOString(),
+      stale,
+    );
   }
 
   private keywordScore(question: string, chunk: RagChunk) {
@@ -491,47 +993,34 @@ export class RagService {
     question: string,
     chunks: RagChunk[],
     history: ChatHistoryMessage[],
+    { useKnowledgeBase = true }: { useKnowledgeBase?: boolean } = {},
   ) {
     const ragConfig = this.configService.get<ConfigurationType['rag']>('rag')!;
     if (!ragConfig.minimaxApiKey) {
-      return '未配置 MINIMAX_API_KEY，已完成检索但无法调用大模型生成回答。';
+      return useKnowledgeBase
+        ? '未配置 MINIMAX_API_KEY，已完成检索但无法调用大模型生成回答。'
+        : '未配置 MINIMAX_API_KEY，无法调用大模型生成回答。';
     }
-
-    const context = chunks
-      .map((chunk, index) => {
-        const published = new Date(chunk.published_at * 1000)
-          .toISOString()
-          .slice(0, 10);
-        return [
-          `资料 ${index + 1}`,
-          `标题：${chunk.title}`,
-          `来源：${chunk.mp_name}`,
-          `分类：${chunk.category}`,
-          `发布时间：${published}`,
-          `链接：${chunk.source_url}`,
-          `内容：${chunk.content}`,
-        ].join('\n');
-      })
-      .join('\n\n---\n\n')
-      .slice(0, MAX_CONTEXT_CHARS);
 
     const historyMessages = history.slice(-8).map((message) => ({
       role: message.role,
       content: message.content,
     }));
 
-    const messages = [
-      {
-        role: 'system',
-        content:
-          '你是公众号知识库问答助手。优先根据用户提供的资料回答，并在关键结论后标注资料编号。资料可能只有标题、来源和链接；如果标题已经足以定位相关条目，请先给出最相关条目，再说明资料未提供更多正文细节。不要把“环境异常”“去验证”“无法访问”等反爬提示当作正文依据。',
-      },
-      ...historyMessages,
-      {
-        role: 'user',
-        content: `问题：${question}\n\n资料：\n${context}`,
-      },
-    ];
+    const messages = useKnowledgeBase
+      ? this.buildRagMessages(question, chunks, historyMessages)
+      : [
+          {
+            role: 'system',
+            content:
+              '你是通用 AI 助手。请直接回答用户问题，可以结合对话历史，但不要声称自己查询了公众号知识库或外部资料；如果信息不足，请明确说明不确定。',
+          },
+          ...historyMessages,
+          {
+            role: 'user',
+            content: question,
+          },
+        ];
 
     const apiUrl = ragConfig.minimaxApiBaseUrl.replace(/\/$/, '');
     const endpoint = apiUrl.endsWith('/v1')
@@ -568,6 +1057,43 @@ export class RagService {
       return '大模型返回格式无法解析，请检查 MINIMAX_API_BASE_URL 和 MINIMAX_MODEL 配置。';
     }
     return this.stripThinking(content);
+  }
+
+  private buildRagMessages(
+    question: string,
+    chunks: RagChunk[],
+    historyMessages: ChatHistoryMessage[],
+  ) {
+    const context = chunks
+      .map((chunk, index) => {
+        const published = new Date(chunk.published_at * 1000)
+          .toISOString()
+          .slice(0, 10);
+        return [
+          `资料 ${index + 1}`,
+          `标题：${chunk.title}`,
+          `来源：${chunk.mp_name}`,
+          `分类：${chunk.category}`,
+          `发布时间：${published}`,
+          `链接：${chunk.source_url}`,
+          `内容：${chunk.content}`,
+        ].join('\n');
+      })
+      .join('\n\n---\n\n')
+      .slice(0, MAX_CONTEXT_CHARS);
+
+    return [
+      {
+        role: 'system',
+        content:
+          '你是公众号知识库问答助手。优先根据用户提供的资料回答，并在关键结论后标注资料编号。资料可能只有标题、来源和链接；如果标题已经足以定位相关条目，请先给出最相关条目，再说明资料未提供更多正文细节。不要把“环境异常”“去验证”“无法访问”等反爬提示当作正文依据。',
+      },
+      ...historyMessages,
+      {
+        role: 'user',
+        content: `问题：${question}\n\n资料：\n${context}`,
+      },
+    ];
   }
 
   private async fetchArticleText(url: string) {

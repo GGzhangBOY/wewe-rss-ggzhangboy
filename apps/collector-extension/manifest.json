@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "WeWe RSS Content Collector",
+  "description": "Collect WeChat article content from the local browser and submit it to WeWe RSS.",
+  "version": "0.1.0",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "WeWe RSS Collector"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["alarms", "scripting", "storage", "tabs"],
+  "host_permissions": ["https://mp.weixin.qq.com/*", "http://*/*", "https://*/*"]
+}

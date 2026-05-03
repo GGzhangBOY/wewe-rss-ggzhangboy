@@ -1,4 +1,6 @@
 import {
+  Accordion,
+  AccordionItem,
   Button,
   Card,
   CardBody,
@@ -9,6 +11,7 @@ import {
   Select,
   SelectItem,
   Spinner,
+  Switch,
   Textarea,
 } from '@nextui-org/react';
 import dayjs from 'dayjs';
@@ -35,6 +38,7 @@ type Conversation = {
   id: string;
   title: string;
   category: string;
+  useKnowledgeBase: boolean;
   updatedAt: number;
   messages: ChatMessage[];
   sources: Source[];
@@ -46,6 +50,7 @@ const createConversation = (): Conversation => ({
   id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
   title: '新对话',
   category: 'all',
+  useKnowledgeBase: true,
   updatedAt: Date.now(),
   messages: [],
   sources: [],
@@ -54,6 +59,7 @@ const createConversation = (): Conversation => ({
 const Knowledge = () => {
   const [question, setQuestion] = useState('');
   const [category, setCategory] = useState('all');
+  const [useKnowledgeBase, setUseKnowledgeBase] = useState(true);
   const [conversations, setConversations] = useState<Conversation[]>([
     createConversation(),
   ]);
@@ -70,10 +76,18 @@ const Knowledge = () => {
     }
     try {
       const parsed = JSON.parse(stored) as Conversation[];
-      if (parsed.length) {
-        setConversations(parsed);
-        setActiveId(parsed[0].id);
-        setCategory(parsed[0].category || 'all');
+      const normalized = parsed.map((conversation) => ({
+        ...conversation,
+        category: conversation.category || 'all',
+        useKnowledgeBase: conversation.useKnowledgeBase ?? true,
+        messages: conversation.messages || [],
+        sources: conversation.sources || [],
+      }));
+      if (normalized.length) {
+        setConversations(normalized);
+        setActiveId(normalized[0].id);
+        setCategory(normalized[0].category || 'all');
+        setUseKnowledgeBase(normalized[0].useKnowledgeBase ?? true);
       }
     } catch {
       localStorage.removeItem(STORAGE_KEY);
@@ -111,6 +125,7 @@ const Knowledge = () => {
     setConversations((items) => [next, ...items]);
     setActiveId(next.id);
     setCategory('all');
+    setUseKnowledgeBase(true);
     setQuestion('');
   };
 
@@ -121,6 +136,7 @@ const Knowledge = () => {
     }
     setActiveId(id);
     setCategory(conversation.category || 'all');
+    setUseKnowledgeBase(conversation.useKnowledgeBase ?? true);
     setQuestion('');
   };
 
@@ -134,6 +150,45 @@ const Knowledge = () => {
     }));
   };
 
+  const handleDeleteConversation = (id: string) => {
+    const nextConversations = conversations.filter((item) => item.id !== id);
+    if (!nextConversations.length) {
+      const next = createConversation();
+      setConversations([next]);
+      setActiveId(next.id);
+      setCategory('all');
+      setUseKnowledgeBase(true);
+      setQuestion('');
+      toast.success('对话已删除');
+      return;
+    }
+
+    setConversations(nextConversations);
+    if (id === activeId) {
+      const next = nextConversations[0];
+      setActiveId(next.id);
+      setCategory(next.category || 'all');
+      setUseKnowledgeBase(next.useKnowledgeBase ?? true);
+      setQuestion('');
+    }
+    toast.success('对话已删除');
+  };
+
+  const handleKnowledgeBaseChange = (selected: boolean) => {
+    setUseKnowledgeBase(selected);
+    setConversations((items) =>
+      items.map((item) =>
+        item.id === activeId
+          ? {
+              ...item,
+              useKnowledgeBase: selected,
+              sources: selected ? item.sources : [],
+            }
+          : item,
+      ),
+    );
+  };
+
   const handleAsk = async () => {
     const text = question.trim();
     if (!text) {
@@ -144,8 +199,9 @@ const Knowledge = () => {
     const history = activeConversation.messages.slice(-12);
     const result = await ask({
       question: text,
-      category: category === 'all' ? undefined : category,
+      category: useKnowledgeBase && category !== 'all' ? category : undefined,
       limit: 8,
+      useKnowledgeBase,
       history,
     });
 
@@ -153,13 +209,14 @@ const Knowledge = () => {
       ...conversation,
       title: conversation.messages.length ? conversation.title : text.slice(0, 28),
       category,
+      useKnowledgeBase,
       updatedAt: Date.now(),
       messages: [
         ...conversation.messages,
         { role: 'user', content: text },
         { role: 'assistant', content: result.answer },
       ],
-      sources: result.sources,
+      sources: useKnowledgeBase ? result.sources : [],
     }));
     setQuestion('');
   };
@@ -189,28 +246,42 @@ const Knowledge = () => {
           <Divider />
           <CardBody className="gap-2">
             {conversations.map((conversation) => (
-              <button
-                className={`rounded-small px-3 py-2 text-left text-sm transition ${
+              <div
+                className={`flex items-start gap-2 rounded-small p-2 text-sm transition ${
                   conversation.id === activeId
                     ? 'bg-primary text-primary-foreground'
                     : 'bg-default-100 hover:bg-default-200'
                 }`}
                 key={conversation.id}
-                onClick={() => handleSelectConversation(conversation.id)}
-                type="button"
               >
-                <div className="line-clamp-1 font-medium">{conversation.title}</div>
-                <div
-                  className={`mt-1 text-xs ${
-                    conversation.id === activeId
-                      ? 'text-primary-foreground/80'
-                      : 'text-default-500'
-                  }`}
+                <button
+                  className="min-w-0 flex-1 text-left"
+                  onClick={() => handleSelectConversation(conversation.id)}
+                  type="button"
                 >
-                  {dayjs(conversation.updatedAt).format('MM-DD HH:mm')} /{' '}
-                  {conversation.messages.length} 条
-                </div>
-              </button>
+                  <div className="line-clamp-1 font-medium">
+                    {conversation.title}
+                  </div>
+                  <div
+                    className={`mt-1 text-xs ${
+                      conversation.id === activeId
+                        ? 'text-primary-foreground/80'
+                        : 'text-default-500'
+                    }`}
+                  >
+                    {dayjs(conversation.updatedAt).format('MM-DD HH:mm')} /{' '}
+                    {conversation.messages.length} 条
+                  </div>
+                </button>
+                <Button
+                  color="danger"
+                  size="sm"
+                  variant={conversation.id === activeId ? 'solid' : 'light'}
+                  onPress={() => handleDeleteConversation(conversation.id)}
+                >
+                  删除
+                </Button>
+              </div>
             ))}
           </CardBody>
         </Card>
@@ -222,6 +293,7 @@ const Knowledge = () => {
               <Select
                 aria-label="分类"
                 className="w-40"
+                isDisabled={!useKnowledgeBase}
                 selectedKeys={[category]}
                 size="sm"
                 onSelectionChange={(keys) =>
@@ -267,51 +339,77 @@ const Knowledge = () => {
               ))}
             </div>
 
-            {!!activeConversation.sources.length && (
-              <>
-                <Divider />
-                <div>
-                  <div className="mb-2 text-sm font-medium">最近引用来源</div>
-                  <div className="space-y-3">
-                    {activeConversation.sources.map((source, index) => (
-                      <div
-                        className="rounded-small border border-default-200 p-3 text-sm"
-                        key={`${source.url}-${index}`}
-                      >
-                        <div className="mb-1 flex items-center gap-2">
-                          <Chip size="sm" variant="flat">
-                            {(source.score * 100).toFixed(1)}
-                          </Chip>
-                          <Link href={source.url} target="_blank">
-                            {source.title}
-                          </Link>
-                        </div>
-                        <div className="mb-2 text-xs text-default-500">
-                          {source.source} / {source.category} /{' '}
-                          {dayjs(source.publishedAt * 1000).format('YYYY-MM-DD')}
-                        </div>
-                        <div className="text-default-600">{source.excerpt}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
-
             <Divider />
             <Textarea
               minRows={3}
               label="问题"
-              placeholder="继续追问，或输入一个新的知识库问题"
+              placeholder={
+                useKnowledgeBase
+                  ? '继续追问，或输入一个新的知识库问题'
+                  : '直接向模型提问，不查询知识库'
+              }
               value={question}
               onValueChange={setQuestion}
             />
-            <div className="flex justify-end">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <Switch
+                isSelected={useKnowledgeBase}
+                size="sm"
+                onValueChange={handleKnowledgeBaseChange}
+              >
+                查询知识库
+              </Switch>
               <Button color="primary" isDisabled={isAsking} onPress={handleAsk}>
                 {isAsking && <Spinner color="white" size="sm" />}
                 提问
               </Button>
             </div>
+
+            {!!activeConversation.sources.length && (
+              <>
+                <Divider />
+                <Accordion
+                  className="px-0"
+                  itemClasses={{
+                    base: 'px-0',
+                    title: 'text-sm font-medium',
+                    trigger: 'py-2',
+                    content: 'pt-0',
+                  }}
+                  variant="light"
+                >
+                  <AccordionItem
+                    key="recent-sources"
+                    aria-label="最近引用来源"
+                    subtitle={`${activeConversation.sources.length} 条来源`}
+                    title="最近引用来源"
+                  >
+                    <div className="space-y-3">
+                      {activeConversation.sources.map((source, index) => (
+                        <div
+                          className="rounded-small border border-default-200 p-3 text-sm"
+                          key={`${source.url}-${index}`}
+                        >
+                          <div className="mb-1 flex items-center gap-2">
+                            <Chip size="sm" variant="flat">
+                              {(source.score * 100).toFixed(1)}
+                            </Chip>
+                            <Link href={source.url} target="_blank">
+                              {source.title}
+                            </Link>
+                          </div>
+                          <div className="mb-2 text-xs text-default-500">
+                            {source.source} / {source.category} /{' '}
+                            {dayjs(source.publishedAt * 1000).format('YYYY-MM-DD')}
+                          </div>
+                          <div className="text-default-600">{source.excerpt}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </AccordionItem>
+                </Accordion>
+              </>
+            )}
           </CardBody>
         </Card>
       </div>

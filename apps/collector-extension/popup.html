@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WeWe RSS Collector</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>正文采集器</h1>
+        <span id="runningBadge">未启动</span>
+      </header>
+
+      <label>
+        服务器地址
+        <input id="serverUrl" placeholder="http://47.121.26.65:4000" />
+      </label>
+
+      <label>
+        授权码
+        <input id="authCode" type="password" placeholder="后台 Authorization" />
+      </label>
+
+      <label>
+        Collector ID
+        <input id="collectorId" />
+      </label>
+
+      <label>
+        打开文章间隔：<strong id="intervalText">3</strong> 秒
+        <input id="intervalSeconds" type="range" min="1" max="5" step="1" />
+      </label>
+
+      <label>
+        最大随机偏移：<strong id="jitterText">0</strong> 秒
+        <input id="randomJitterSeconds" type="range" min="0" max="60" step="1" />
+      </label>
+
+      <section class="actions">
+        <button id="saveButton">保存</button>
+        <button id="startButton">启动</button>
+        <button id="stopButton">停止</button>
+      </section>
+
+      <button id="runOnceButton" class="secondary">立即采集一篇</button>
+      <button id="openActiveTabButton" class="secondary">打开当前采集页</button>
+      <button id="retryActiveTabButton" class="secondary">重试当前采集页</button>
+
+      <section class="status">
+        <div class="label">状态</div>
+        <div id="statusText">读取中...</div>
+        <div id="statusTime"></div>
+      </section>
+
+      <p class="hint">
+        遇到微信验证页时，插件会把文章标签页切到前台。验证通过后会自动恢复到原来的标签页。
+      </p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

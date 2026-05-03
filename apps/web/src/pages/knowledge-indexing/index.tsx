@@ -34,8 +34,12 @@ const KnowledgeIndexing = () => {
   const { data: feedData } = trpc.feed.list.useQuery({});
   const { data: dashboard, refetch: refetchDashboard } =
     trpc.rag.dashboard.useQuery({ articleLimit: 50 });
+  const { data: jobStats, refetch: refetchJobStats } =
+    trpc.rag.contentJobStats.useQuery();
   const { mutateAsync: reindex, isLoading: isIndexing } =
     trpc.rag.reindex.useMutation();
+  const { mutateAsync: createContentJobs, isLoading: isCreatingJobs } =
+    trpc.rag.createContentJobs.useMutation();
 
   const categories = useMemo(() => {
     const values = new Set<string>();
@@ -45,19 +49,29 @@ const KnowledgeIndexing = () => {
     return ['all', ...Array.from(values)];
   }, [feedData?.items]);
 
-  const handleReindex = async () => {
+  const handleIndexAndCreateJobs = async () => {
     const result = await reindex({
       limit: indexLimit,
       includeFullText,
       category: category === 'all' ? undefined : category,
     });
-    toast.success('索引完成', {
-      description: `文章 ${result.indexedArticles} 篇，片段 ${result.indexedChunks} 个`,
+    const jobs = await createContentJobs({
+      limit: indexLimit,
+      category: category === 'all' ? undefined : category,
+      onlyMissingContent: true,
+    });
+    toast.success('索引和采集任务已完成', {
+      description: `索引文章 ${result.indexedArticles} 篇，创建正文任务 ${jobs.created} 个，复用失败任务 ${jobs.reused || 0} 个`,
     });
     refetchDashboard();
+    refetchJobStats();
   };
 
   const summary = dashboard?.summary;
+  const jobCount = (status: string) =>
+    jobStats?.jobs.find((item) => item.status === status)?.count || 0;
+  const contentCount = (status: string) =>
+    jobStats?.contents.find((item) => item.status === status)?.count || 0;
 
   return (
     <div className="h-full overflow-y-auto p-4">
@@ -95,10 +109,10 @@ const KnowledgeIndexing = () => {
               type="number"
               label="本次索引文章数"
               min={1}
-              max={200}
+              max={400}
               value={`${indexLimit}`}
               onValueChange={(value) =>
-                setIndexLimit(Math.min(200, Math.max(1, Number(value || 30))))
+                setIndexLimit(Math.min(400, Math.max(1, Number(value || 30))))
               }
             />
             <Switch isSelected={includeFullText} onValueChange={setIncludeFullText}>
@@ -106,11 +120,13 @@ const KnowledgeIndexing = () => {
             </Switch>
             <Button
               color="primary"
-              isDisabled={isIndexing}
-              onPress={handleReindex}
+              isDisabled={isIndexing || isCreatingJobs}
+              onPress={handleIndexAndCreateJobs}
             >
-              {isIndexing && <Spinner color="white" size="sm" />}
-              重建索引
+              {(isIndexing || isCreatingJobs) && (
+                <Spinner color="white" size="sm" />
+              )}
+              索引并创建正文采集任务
             </Button>
           </CardBody>
         </Card>
@@ -130,6 +146,66 @@ const KnowledgeIndexing = () => {
               suffix={`${summary?.fullTextCoverage || 0}%`}
             />
           </div>
+
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-6">
+            <MetricCard label="待采集" value={jobCount('pending')} />
+            <MetricCard label="采集中" value={jobCount('running')} />
+            <MetricCard label="采集成功" value={jobCount('success')} />
+            <MetricCard label="采集失败" value={jobCount('failed')} />
+            <MetricCard label="需验证" value={jobCount('verify_required')} />
+            <MetricCard label="正文落库" value={contentCount('success')} />
+          </div>
+
+          <Card radius="sm">
+            <CardHeader className="font-medium">采集失败明细</CardHeader>
+            <Divider />
+            <CardBody>
+              <Table removeWrapper aria-label="采集失败明细">
+                <TableHeader>
+                  <TableColumn>标题</TableColumn>
+                  <TableColumn>分类</TableColumn>
+                  <TableColumn>状态</TableColumn>
+                  <TableColumn>失败次数</TableColumn>
+                  <TableColumn>最近原因</TableColumn>
+                  <TableColumn>最近时间</TableColumn>
+                </TableHeader>
+                <TableBody emptyContent="暂无失败任务">
+                  {(jobStats?.failedDetails || []).map((item) => (
+                    <TableRow key={item.articleId}>
+                      <TableCell>
+                        <Link href={item.sourceUrl} target="_blank">
+                          {item.title || item.articleId}
+                        </Link>
+                      </TableCell>
+                      <TableCell>{item.category || '-'}</TableCell>
+                      <TableCell>
+                        <Chip
+                          color={
+                            item.status === 'verify_required'
+                              ? 'warning'
+                              : 'danger'
+                          }
+                          size="sm"
+                          variant="flat"
+                        >
+                          {item.status}
+                        </Chip>
+                      </TableCell>
+                      <TableCell>{item.failedCount}</TableCell>
+                      <TableCell className="max-w-[360px] whitespace-normal">
+                        {item.failReason || '-'}
+                      </TableCell>
+                      <TableCell>
+                        {item.updatedAt
+                          ? dayjs(item.updatedAt).format('MM-DD HH:mm')
+                          : '-'}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </CardBody>
+          </Card>
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <Card radius="sm">

@@ -436,10 +436,62 @@ export class TrpcRouter {
       .query(async ({ input }) => {
         return this.ragService.dashboard(input);
       }),
+    createContentJobs: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          limit: z.number().min(1).max(500).default(30),
+          category: z.string().optional(),
+          onlyMissingContent: z.boolean().default(true),
+        }),
+      )
+      .mutation(async ({ input }) => {
+        return this.ragService.createContentJobs(input);
+      }),
+    claimContentJob: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          collectorId: z.string().min(1).max(120),
+        }),
+      )
+      .mutation(async ({ input }) => {
+        return this.ragService.claimContentJob(input);
+      }),
+    submitArticleContent: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          jobId: z.string().min(1),
+          articleId: z.string().min(1),
+          title: z.string().min(1),
+          author: z.string().optional(),
+          content: z.string().min(1),
+          contentHtml: z.string().optional(),
+          contentLength: z.number().optional(),
+          collectorId: z.string().min(1).max(120),
+        }),
+      )
+      .mutation(async ({ input }) => {
+        return this.ragService.submitArticleContent(input);
+      }),
+    failContentJob: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          jobId: z.string().min(1),
+          articleId: z.string().min(1),
+          status: z.enum(['failed', 'verify_required', 'empty']),
+          reason: z.string().min(1).max(1000),
+          collectorId: z.string().min(1).max(120),
+        }),
+      )
+      .mutation(async ({ input }) => {
+        return this.ragService.failContentJob(input);
+      }),
+    contentJobStats: this.trpcService.protectedProcedure.query(async () => {
+      return this.ragService.contentJobStats();
+    }),
     reindex: this.trpcService.protectedProcedure
       .input(
         z.object({
-          limit: z.number().min(1).max(200).default(30),
+          limit: z.number().min(1).max(400).default(30),
           includeFullText: z.boolean().default(true),
           category: z.string().optional(),
         }),
@@ -453,6 +505,7 @@ export class TrpcRouter {
           question: z.string().min(1).max(1000),
           category: z.string().optional(),
           limit: z.number().min(1).max(12).default(8),
+          useKnowledgeBase: z.boolean().default(true),
           history: z
             .array(
               z.object({
