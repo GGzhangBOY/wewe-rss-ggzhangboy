@@ -23,7 +23,7 @@ export class FeedsController {
     return this.feedsService.getFeedList();
   }
 
-  @Get('/all.(json|rss|atom)')
+  @Get('/all.(json|rss|atom|md|markdown)')
   async getFeeds(
     @Request() req: Req,
     @Response() res: Res,

@@ -18,6 +18,13 @@ const configuration = () => {
   const updateDelayTime = parseInt(`${process.env.UPDATE_DELAY_TIME} || 60`);
 
   const enableCleanHtml = process.env.ENABLE_CLEAN_HTML === 'true';
+
+  const minimaxApiKey = process.env.MINIMAX_API_KEY || '';
+  const minimaxApiBaseUrl =
+    process.env.MINIMAX_API_BASE_URL ||
+    'https://api.minimax.io/v1/chat/completions';
+  const minimaxModel = process.env.MINIMAX_MODEL || 'MiniMax-M2.7';
+
   return {
     server: { isProd, port, host },
     throttler: { maxRequestPerMinute },
@@ -31,6 +38,11 @@ const configuration = () => {
     },
     database: {
       type: databaseType,
+    },
+    rag: {
+      minimaxApiKey,
+      minimaxApiBaseUrl,
+      minimaxModel,
     },
   };
 };

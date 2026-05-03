@@ -19,6 +19,14 @@ const mpCache = new LRUCache<string, string>({
   max: 5000,
 });
 
+type MarkdownFeedItem = Item & {
+  author?: Array<{ name?: string }>;
+  content?: string;
+  image?: string;
+  link?: string;
+  title: string;
+};
+
 @Injectable()
 export class FeedsService {
   private readonly logger = new Logger(this.constructor.name);
@@ -225,6 +233,67 @@ export class FeedsService {
     return feed;
   }
 
+  private escapeMarkdownText(text = '') {
+    return text.replace(/([\\`*_{}\[\]()#+\-.!|>])/g, '\\$1');
+  }
+
+  private formatMarkdownDate(date?: Date) {
+    if (!date) {
+      return '';
+    }
+
+    return date.toISOString().replace('T', ' ').slice(0, 16);
+  }
+
+  renderMarkdownFeed(feedInfo: FeedInfo, feed: Feed, type: string) {
+    const { originUrl } =
+      this.configService.get<ConfigurationType['feed']>('feed')!;
+    const link = `${originUrl}/feeds/${feedInfo.id}.${type}`;
+
+    const lines = [
+      `# ${this.escapeMarkdownText(feedInfo.mpName)}`,
+      '',
+      feedInfo.mpIntro,
+      '',
+      `- Feed: ${link}`,
+      `- Updated: ${this.formatMarkdownDate(
+        new Date(feedInfo.updateTime * 1e3),
+      )}`,
+      '',
+    ];
+
+    for (const item of feed.items as MarkdownFeedItem[]) {
+      const title = this.escapeMarkdownText(item.title);
+      const itemLink = item.link || '';
+      const published = this.formatMarkdownDate(item.date);
+      const author = item.author?.[0]?.name;
+
+      lines.push(`## ${itemLink ? `[${title}](${itemLink})` : title}`, '');
+
+      if (published) {
+        lines.push(`- Published: ${published}`);
+      }
+      if (author) {
+        lines.push(`- Author: ${this.escapeMarkdownText(author)}`);
+      }
+      if (itemLink) {
+        lines.push(`- Link: ${itemLink}`);
+      }
+
+      lines.push('');
+
+      if (item.image) {
+        lines.push(`![${title}](${item.image})`, '');
+      }
+
+      if (item.content) {
+        lines.push(item.content.trim(), '');
+      }
+    }
+
+    return lines.join('\n').trim() + '\n';
+  }
+
   async handleGenerateFeed({
     id,
     type,
@@ -310,6 +379,12 @@ export class FeedsService {
         return { content: feed.rss2(), mimeType: feedMimeTypeMap[type] };
       case 'json':
         return { content: feed.json1(), mimeType: feedMimeTypeMap[type] };
+      case 'md':
+      case 'markdown':
+        return {
+          content: this.renderMarkdownFeed(feedInfo, feed, type),
+          mimeType: feedMimeTypeMap[type],
+        };
       case 'atom':
       default:
         return { content: feed.atom1(), mimeType: feedMimeTypeMap[type] };

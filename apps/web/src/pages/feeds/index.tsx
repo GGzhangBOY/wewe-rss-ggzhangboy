@@ -209,12 +209,15 @@ const Feeds = () => {
             <Listbox
               aria-label="订阅源"
               emptyContent="暂无订阅"
-              onAction={(key) => setCurrentMpId(key as string)}
+              onAction={(key) => {
+                const nextId = key as string;
+                setCurrentMpId(nextId);
+                navigate(nextId ? `/feeds/${nextId}` : '/feeds');
+              }}
             >
               <ListboxSection showDivider>
                 <ListboxItem
                   key={''}
-                  href={`/feeds`}
                   className={isActive('') ? 'bg-primary-50 text-primary' : ''}
                   startContent={<Avatar name="ALL"></Avatar>}
                 >
@@ -226,16 +229,23 @@ const Feeds = () => {
                 {filteredFeedItems.map((item) => {
                   return (
                     <ListboxItem
-                      href={`/feeds/${item.id}`}
                       className={
                         isActive(item.id) ? 'bg-primary-50 text-primary' : ''
                       }
                       key={item.id}
                       startContent={<Avatar src={item.mpCover}></Avatar>}
                       endContent={
-                        <Button size="sm" variant="light" onClick={() => {
-                          handleSetCategory(item);
-                        }}>分类</Button>
+                        <Button
+                          size="sm"
+                          variant="light"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            handleSetCategory(item);
+                          }}
+                        >
+                          分类
+                        </Button>
                       }
                     >
                       {item.mpName} {(item.category || "未分类") && (<span className="text-xs text-default-400">[{item.category || "未分类"}]</span>)}

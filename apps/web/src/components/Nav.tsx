@@ -20,6 +20,15 @@ const navbarItemLink = [
     name: '公众号源',
   },
   {
+    href: '/knowledge',
+    name: '知识问答',
+    exact: true,
+  },
+  {
+    href: '/knowledge/indexing',
+    name: '索引配置',
+  },
+  {
     href: '/accounts',
     name: '账号管理',
   },
@@ -86,9 +95,12 @@ const Nav = () => {
         </Tooltip>
         <NavbarContent className="hidden sm:flex gap-4" justify="center">
           {navbarItemLink.map((item) => {
+            const isActive = item.exact
+              ? pathname === item.href
+              : pathname === item.href || pathname.startsWith(`${item.href}/`);
             return (
               <NavbarItem
-                isActive={pathname.startsWith(item.href)}
+                isActive={isActive}
                 key={item.href}
               >
                 <Link color="foreground" href={item.href}>

@@ -7,6 +7,7 @@ import { PrismaService } from '@server/prisma/prisma.service';
 import { statusMap } from '@server/constants';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from '@server/configuration';
+import { RagService } from '@server/rag/rag.service';
 
 @Injectable()
 export class TrpcRouter {
@@ -14,6 +15,7 @@ export class TrpcRouter {
     private readonly trpcService: TrpcService,
     private readonly prismaService: PrismaService,
     private readonly configService: ConfigService,
+    private readonly ragService: RagService,
   ) {}
 
   private readonly logger = new Logger(this.constructor.name);
@@ -87,7 +89,6 @@ export class TrpcRouter {
           token: z.string().min(1),
           name: z.string().min(1),
           status: z.number().default(statusMap.ENABLE),
-          category: z.string().optional().default(''),
         }),
       )
       .mutation(async ({ input }) => {
@@ -111,7 +112,6 @@ export class TrpcRouter {
             token: z.string().min(1).optional(),
             name: z.string().min(1).optional(),
             status: z.number().optional(),
-            category: z.string().optional(),
           }),
         }),
       )
@@ -421,11 +421,60 @@ export class TrpcRouter {
       }),
   });
 
+  ragRouter = this.trpcService.router({
+    stats: this.trpcService.protectedProcedure.query(async () => {
+      return this.ragService.stats();
+    }),
+    dashboard: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            articleLimit: z.number().min(1).max(200).default(30),
+          })
+          .optional(),
+      )
+      .query(async ({ input }) => {
+        return this.ragService.dashboard(input);
+      }),
+    reindex: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          limit: z.number().min(1).max(200).default(30),
+          includeFullText: z.boolean().default(true),
+          category: z.string().optional(),
+        }),
+      )
+      .mutation(async ({ input }) => {
+        return this.ragService.reindex(input);
+      }),
+    ask: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          question: z.string().min(1).max(1000),
+          category: z.string().optional(),
+          limit: z.number().min(1).max(12).default(8),
+          history: z
+            .array(
+              z.object({
+                role: z.enum(['user', 'assistant']),
+                content: z.string().min(1).max(4000),
+              }),
+            )
+            .max(12)
+            .optional(),
+        }),
+      )
+      .mutation(async ({ input }) => {
+        return this.ragService.ask(input);
+      }),
+  });
+
   appRouter = this.trpcService.router({
     feed: this.feedRouter,
     account: this.accountRouter,
     article: this.articleRouter,
     platform: this.platformRouter,
+    rag: this.ragRouter,
   });
 
   async applyMiddleware(app: INestApplication) {
