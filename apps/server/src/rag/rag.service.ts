@@ -142,25 +142,36 @@ export class RagService {
   }
 
   async reindex({
+    userId,
     limit = 30,
     includeFullText = true,
     category,
   }: {
+    userId?: string;
     limit?: number;
     includeFullText?: boolean;
     category?: string;
   }) {
     await this.ensureSchema();
+    const feeds = await this.getSubscribedFeeds(userId);
+    if (!feeds.length) {
+      return { indexedArticles: 0, indexedChunks: 0, totalChunks: 0 };
+    }
+    const feedIds = feeds.map((feed) => feed.id);
+    const placeholders = feedIds.map(() => '?').join(',');
     if (category) {
       await this.prismaService.$executeRawUnsafe(
-        `DELETE FROM rag_chunks WHERE category = ?`,
+        `DELETE FROM rag_chunks WHERE category = ? AND mp_id IN (${placeholders})`,
         category,
+        ...feedIds,
       );
     } else {
-      await this.prismaService.$executeRawUnsafe(`DELETE FROM rag_chunks`);
+      await this.prismaService.$executeRawUnsafe(
+        `DELETE FROM rag_chunks WHERE mp_id IN (${placeholders})`,
+        ...feedIds,
+      );
     }
 
-    const feeds = await this.prismaService.feed.findMany();
     const feedMap = new Map(feeds.map((feed) => [feed.id, feed]));
     const filteredFeedIds = category
       ? feeds
@@ -170,7 +181,7 @@ export class RagService {
 
     const articles = await this.prismaService.article.findMany({
       take: limit,
-      where: filteredFeedIds ? { mpId: { in: filteredFeedIds } } : undefined,
+      where: { mpId: { in: filteredFeedIds || feedIds } },
       orderBy: { publishTime: 'desc' },
     });
     const contents = await this.getArticleContentMap(
@@ -242,17 +253,19 @@ export class RagService {
       indexedArticles += 1;
     }
 
-    const total = await this.countChunks();
+    const total = await this.countChunks(feedIds);
     return { indexedArticles, indexedChunks, totalChunks: total };
   }
 
   async ask({
+    userId,
     question,
     category,
     limit = 8,
     history = [],
     useKnowledgeBase = true,
   }: {
+    userId?: string;
     question: string;
     category?: string;
     limit?: number;
@@ -272,7 +285,7 @@ export class RagService {
     }
 
     const searchText = this.buildSearchText(question, history);
-    const chunks = await this.search(searchText, { category, limit });
+    const chunks = await this.search(searchText, { userId, category, limit });
 
     if (!chunks.length) {
       return {
@@ -301,13 +314,20 @@ export class RagService {
     };
   }
 
-  async stats() {
+  async stats(userId?: string) {
     await this.ensureSchema();
-    const totalChunks = await this.countChunks();
+    const feeds = await this.getSubscribedFeeds(userId);
+    const feedIds = feeds.map((feed) => feed.id);
+    if (!feedIds.length) {
+      return { totalChunks: 0, categories: [] };
+    }
+    const placeholders = feedIds.map(() => '?').join(',');
+    const totalChunks = await this.countChunks(feedIds);
     const rows = await this.prismaService.$queryRawUnsafe<
       Array<{ category: string; count: bigint | number }>
     >(
-      `SELECT category, COUNT(*) as count FROM rag_chunks GROUP BY category ORDER BY count DESC`,
+      `SELECT category, COUNT(*) as count FROM rag_chunks WHERE mp_id IN (${placeholders}) GROUP BY category ORDER BY count DESC`,
+      ...feedIds,
     );
     return {
       totalChunks,
@@ -319,17 +339,23 @@ export class RagService {
   }
 
   async createContentJobs({
+    userId,
     limit = 30,
     category,
     onlyMissingContent = true,
   }: {
+    userId?: string;
     limit?: number;
     category?: string;
     onlyMissingContent?: boolean;
   }) {
     await this.ensureSchema();
-    const feeds = await this.prismaService.feed.findMany();
+    const feeds = await this.getSubscribedFeeds(userId);
+    if (!feeds.length) {
+      return { created: 0, reused: 0, skipped: 0, totalCandidates: 0 };
+    }
     const feedMap = new Map(feeds.map((feed) => [feed.id, feed]));
+    const feedIds = feeds.map((feed) => feed.id);
     const filteredFeedIds = category
       ? feeds
           .filter((feed) => (feed.category || '未分类') === category)
@@ -337,7 +363,7 @@ export class RagService {
       : undefined;
     const articles = await this.prismaService.article.findMany({
       take: limit,
-      where: filteredFeedIds ? { mpId: { in: filteredFeedIds } } : undefined,
+      where: { mpId: { in: filteredFeedIds || feedIds } },
       orderBy: { publishTime: 'desc' },
     });
 
@@ -450,18 +476,39 @@ export class RagService {
     return { created, reused, skipped, totalCandidates: articles.length };
   }
 
-  async claimContentJob({ collectorId }: { collectorId: string }) {
+  async claimContentJob({
+    userId,
+    collectorId,
+  }: {
+    userId?: string;
+    collectorId: string;
+  }) {
     await this.ensureSchema();
     await this.releaseStaleContentJobs();
     const now = new Date();
+    const feeds = await this.getSubscribedFeeds(userId);
+    const feedIds = feeds.map((feed) => feed.id);
+    if (!feedIds.length) {
+      return null;
+    }
+    const articles = await this.prismaService.article.findMany({
+      where: { mpId: { in: feedIds } },
+      select: { id: true },
+    });
+    const articleIds = articles.map((article) => article.id);
+    if (!articleIds.length) {
+      return null;
+    }
 
     const rows = await this.prismaService.$queryRawUnsafe<ArticleContentJob[]>(
       `
         SELECT * FROM article_content_jobs
         WHERE status = 'pending'
+          AND article_id IN (${articleIds.map(() => '?').join(',')})
         ORDER BY created_at ASC
         LIMIT 1
       `,
+      ...articleIds,
     );
     const job = rows[0];
     if (!job) {
@@ -630,23 +677,37 @@ export class RagService {
     return { articleId, status: normalizedStatus, reason };
   }
 
-  async contentJobStats() {
+  async contentJobStats(userId?: string) {
     await this.ensureSchema();
     await this.releaseStaleContentJobs();
+    const feeds = await this.getSubscribedFeeds(userId);
+    const feedIds = feeds.map((feed) => feed.id);
+    const articles = feedIds.length
+      ? await this.prismaService.article.findMany({
+          where: { mpId: { in: feedIds } },
+          select: { id: true },
+        })
+      : [];
+    const articleIds = new Set(articles.map((article) => article.id));
     const jobRows = await this.prismaService.$queryRawUnsafe<
       ArticleContentJob[]
     >(
       `SELECT * FROM article_content_jobs ORDER BY article_id ASC, updated_at DESC`,
     );
-    const contents = await this.prismaService.$queryRawUnsafe<
+    const contentsRows = await this.prismaService.$queryRawUnsafe<
       Array<{ fetch_status: string; count: bigint | number }>
     >(
-      `SELECT fetch_status, COUNT(*) as count FROM article_contents GROUP BY fetch_status`,
+      articleIds.size
+        ? `SELECT fetch_status, COUNT(*) as count FROM article_contents WHERE article_id IN (${Array.from(articleIds)
+            .map(() => '?')
+            .join(',')}) GROUP BY fetch_status`
+        : `SELECT fetch_status, COUNT(*) as count FROM article_contents WHERE 1 = 0 GROUP BY fetch_status`,
+      ...Array.from(articleIds),
     );
 
     const latestByArticle = new Map<string, ArticleContentJob>();
     const failedCounts = new Map<string, number>();
-    for (const job of jobRows) {
+    for (const job of jobRows.filter((item) => articleIds.has(item.article_id))) {
       if (!latestByArticle.has(job.article_id)) {
         latestByArticle.set(job.article_id, job);
       }
@@ -683,7 +744,7 @@ export class RagService {
         status,
         count,
       })),
-      contents: contents.map((row) => ({
+      contents: contentsRows.map((row) => ({
         status: row.fetch_status,
         count: Number(row.count),
       })),
@@ -691,14 +752,22 @@ export class RagService {
     };
   }
 
-  async dashboard({ articleLimit = 30 }: { articleLimit?: number } = {}) {
+  async dashboard({
+    userId,
+    articleLimit = 30,
+  }: { userId?: string; articleLimit?: number } = {}) {
     await this.ensureSchema();
     await this.releaseStaleContentJobs();
 
-    const feeds = await this.prismaService.feed.findMany();
+    const feeds = await this.getSubscribedFeeds(userId);
+    const feedIds = feeds.map((feed) => feed.id);
     const articles = await this.prismaService.article.findMany({
+      where: feedIds.length ? { mpId: { in: feedIds } } : { mpId: '__none__' },
       orderBy: { publishTime: 'desc' },
     });
+    const chunkWhere = feedIds.length
+      ? `WHERE mp_id IN (${feedIds.map(() => '?').join(',')})`
+      : `WHERE 1 = 0`;
     const chunks = await this.prismaService.$queryRawUnsafe<
       Array<{
         article_id: string;
@@ -713,7 +782,8 @@ export class RagService {
         chunk_count: bigint | number;
         content_length: bigint | number;
       }>
-    >(`
+    >(
+      `
       SELECT
         article_id,
         title,
@@ -727,8 +797,11 @@ export class RagService {
         COUNT(*) as chunk_count,
         SUM(LENGTH(content)) as content_length
       FROM rag_chunks
+      ${chunkWhere}
       GROUP BY article_id
-    `);
+    `,
+      ...feedIds,
+    );
     const contents = await this.prismaService.$queryRawUnsafe<ArticleContent[]>(
       `SELECT * FROM article_contents`,
     );
@@ -877,16 +950,28 @@ export class RagService {
 
   private async search(
     question: string,
-    { category, limit }: { category?: string; limit: number },
+    {
+      userId,
+      category,
+      limit,
+    }: { userId?: string; category?: string; limit: number },
   ) {
+    const feeds = await this.getSubscribedFeeds(userId);
+    const feedIds = feeds.map((feed) => feed.id);
+    if (!feedIds.length) {
+      return [];
+    }
+    const placeholders = feedIds.map(() => '?').join(',');
     const queryVector = this.embedText(question);
     const rows = category
       ? await this.prismaService.$queryRawUnsafe<RagChunk[]>(
-          `SELECT * FROM rag_chunks WHERE category = ? ORDER BY published_at DESC LIMIT 600`,
+          `SELECT * FROM rag_chunks WHERE category = ? AND mp_id IN (${placeholders}) ORDER BY published_at DESC LIMIT 600`,
           category,
+          ...feedIds,
         )
       : await this.prismaService.$queryRawUnsafe<RagChunk[]>(
-          `SELECT * FROM rag_chunks ORDER BY published_at DESC LIMIT 800`,
+          `SELECT * FROM rag_chunks WHERE mp_id IN (${placeholders}) ORDER BY published_at DESC LIMIT 800`,
+          ...feedIds,
         );
 
     return rows
@@ -910,6 +995,23 @@ export class RagService {
       ...articleIds,
     );
     return new Map(rows.map((row) => [row.article_id, row]));
+  }
+
+  private async getSubscribedFeeds(userId?: string) {
+    if (!userId) {
+      return this.prismaService.feed.findMany();
+    }
+
+    const userFeeds = await this.prismaService.userFeed.findMany({
+      where: { userId },
+      include: { feed: true },
+    });
+
+    return userFeeds.map((item) => ({
+      ...item.feed,
+      status: item.status,
+      category: item.category,
+    }));
   }
 
   private async releaseStaleContentJobs() {
@@ -1211,10 +1313,16 @@ export class RagService {
     return hash.readInt32BE(0);
   }
 
-  private async countChunks() {
+  private async countChunks(feedIds?: string[]) {
+    if (feedIds && !feedIds.length) {
+      return 0;
+    }
+    const where = feedIds?.length
+      ? ` WHERE mp_id IN (${feedIds.map(() => '?').join(',')})`
+      : '';
     const rows = await this.prismaService.$queryRawUnsafe<
       Array<{ count: bigint | number }>
-    >(`SELECT COUNT(*) as count FROM rag_chunks`);
+    >(`SELECT COUNT(*) as count FROM rag_chunks${where}`, ...(feedIds || []));
     return Number(rows[0]?.count || 0);
   }
 }

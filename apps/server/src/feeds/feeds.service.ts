@@ -81,9 +81,12 @@ export class FeedsService {
   async handleUpdateFeedsCron() {
     this.logger.debug('Called handleUpdateFeedsCron');
 
-    const feeds = await this.prismaService.feed.findMany({
+    const subscriptions = await this.prismaService.userFeed.findMany({
       where: { status: 1 },
+      distinct: ['feedId'],
+      select: { feedId: true },
     });
+    const feeds = subscriptions.map((item) => ({ id: item.feedId }));
     this.logger.debug('feeds length:' + feeds.length);
 
     const updateDelayTime =

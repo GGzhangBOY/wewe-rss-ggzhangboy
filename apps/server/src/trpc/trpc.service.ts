@@ -23,8 +23,13 @@ export class TrpcService {
   publicProcedure = this.trpc.procedure;
   protectedProcedure = this.trpc.procedure.use(({ ctx, next }) => {
     const errorMsg = (ctx as any).errorMsg;
-    if (errorMsg) {
-      throw new TRPCError({ code: 'UNAUTHORIZED', message: errorMsg });
+    const user = (ctx as any).user;
+    const legacyAuth = (ctx as any).legacyAuth;
+    if (errorMsg || (!user && !legacyAuth)) {
+      throw new TRPCError({
+        code: 'UNAUTHORIZED',
+        message: errorMsg || 'Please sign in',
+      });
     }
     return next({ ctx });
   });
@@ -113,11 +118,12 @@ export class TrpcService {
     return disabledAccounts.filter(Boolean);
   }
 
-  private async getAvailableAccount() {
+  private async getAvailableAccount(userId?: string) {
     const disabledAccounts = this.getBlockedAccountIds();
     const account = await this.prismaService.account.findMany({
       where: {
         status: statusMap.ENABLE,
+        ...(userId ? { userId } : {}),
         NOT: {
           id: { in: disabledAccounts },
         },
@@ -132,8 +138,13 @@ export class TrpcService {
     return account[Math.floor(Math.random() * account.length)];
   }
 
-  async getMpArticles(mpId: string, page = 1, retryCount = 3) {
-    const account = await this.getAvailableAccount();
+  async getMpArticles(
+    mpId: string,
+    page = 1,
+    retryCount = 3,
+    userId?: string,
+  ) {
+    const account = await this.getAvailableAccount(userId);
 
     try {
       const res = await this.request
@@ -164,15 +175,19 @@ export class TrpcService {
     } catch (err) {
       this.logger.error(`retry(${4 - retryCount}) getMpArticles  error: `, err);
       if (retryCount > 0) {
-        return this.getMpArticles(mpId, page, retryCount - 1);
+        return this.getMpArticles(mpId, page, retryCount - 1, userId);
       } else {
         throw err;
       }
     }
   }
 
-  async refreshMpArticlesAndUpdateFeed(mpId: string, page = 1) {
-    const articles = await this.getMpArticles(mpId, page);
+  async refreshMpArticlesAndUpdateFeed(
+    mpId: string,
+    page = 1,
+    userId?: string,
+  ) {
+    const articles = await this.getMpArticles(mpId, page, 3, userId);
 
     if (articles.length > 0) {
       let results;
@@ -228,7 +243,7 @@ export class TrpcService {
     page: 1,
   };
 
-  async getHistoryMpArticles(mpId: string) {
+  async getHistoryMpArticles(mpId: string, userId?: string) {
     if (this.inProgressHistoryMp.id === mpId) {
       this.logger.log(`getHistoryMpArticles(${mpId}) is running`);
       return;
@@ -275,6 +290,7 @@ export class TrpcService {
         const { hasHistory } = await this.refreshMpArticlesAndUpdateFeed(
           mpId,
           this.inProgressHistoryMp.page,
+          userId,
         );
         if (hasHistory < 1) {
           this.logger.log(
@@ -298,16 +314,26 @@ export class TrpcService {
 
   isRefreshAllMpArticlesRunning = false;
 
-  async refreshAllMpArticlesAndUpdateFeed() {
+  async refreshAllMpArticlesAndUpdateFeed(userId?: string) {
     if (this.isRefreshAllMpArticlesRunning) {
       this.logger.log('refreshAllMpArticlesAndUpdateFeed is running');
       return;
     }
-    const mps = await this.prismaService.feed.findMany();
+    const mps = userId
+      ? (
+          await this.prismaService.userFeed.findMany({
+            where: { userId, status: statusMap.ENABLE },
+            select: { feedId: true },
+          })
+        ).map((item) => ({ id: item.feedId }))
+      : await this.prismaService.feed.findMany({
+          where: { status: statusMap.ENABLE },
+          select: { id: true },
+        });
     this.isRefreshAllMpArticlesRunning = true;
     try {
       for (const { id } of mps) {
-        await this.refreshMpArticlesAndUpdateFeed(id);
+        await this.refreshMpArticlesAndUpdateFeed(id, 1, userId);
 
         await new Promise((resolve) =>
           setTimeout(resolve, this.updateDelayTime * 1e3),
@@ -318,9 +344,9 @@ export class TrpcService {
     }
   }
 
-  async getMpInfo(url: string) {
+  async getMpInfo(url: string, userId?: string) {
     url = url.trim();
-    const account = await this.getAvailableAccount();
+    const account = await this.getAvailableAccount(userId);
 
     return this.request
       .post<

@@ -5,58 +5,95 @@ datasource db {
 
 generator client {
   provider      = "prisma-client-js"
-  binaryTargets = ["native", "linux-musl"] // 生成linux可执行文件
+  binaryTargets = ["native", "linux-musl"]
 }
 
-// 读书账号
 model Account {
   id        String    @id
   token     String    @map("token")
   name      String    @map("name")
-  // 状态 0:失效 1:启用 2:禁用
   status    Int       @default(1) @map("status")
+  userId    String?   @map("user_id")
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime? @default(now()) @updatedAt @map("updated_at")
 
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
   @@map("accounts")
 }
 
-// 订阅源
-model Feed {
-  id      String @id
-  mpName  String @map("mp_name")
-  mpCover String @map("mp_cover")
-  mpIntro String @map("mp_intro")
-  // 状态 0:失效 1:启用 2:禁用
-  status  Int    @default(1) @map("status")
+model User {
+  id           String    @id
+  username     String    @unique @map("username")
+  role         String    @default("user") @map("role")
+  passwordHash String    @map("password_hash")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime? @default(now()) @updatedAt @map("updated_at")
 
-  // article最后同步时间
-  syncTime Int @default(0) @map("sync_time")
+  accounts Account[]
+  feeds    UserFeed[]
+  sessions Session[]
 
-  // 信息更新时间
-  updateTime Int @map("update_time")
+  @@map("users")
+}
 
+model Session {
+  id        String   @id
+  tokenHash String   @unique @map("token_hash")
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model UserFeed {
+  userId    String    @map("user_id")
+  feedId    String    @map("feed_id")
+  status    Int       @default(1) @map("status")
+  category  String    @default("") @map("category")
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime? @default(now()) @updatedAt @map("updated_at")
 
-  // 是否有历史文章 1 是  0 否
-  hasHistory Int? @default(1) @map("has_history")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  feed Feed @relation(fields: [feedId], references: [id], onDelete: Cascade)
 
-  // 用户自定义分类
-  category String @default("") @map("category")
+  @@id([userId, feedId])
+  @@index([feedId])
+  @@map("user_feeds")
+}
+
+model Feed {
+  id         String    @id
+  mpName     String    @map("mp_name")
+  mpCover    String    @map("mp_cover")
+  mpIntro    String    @map("mp_intro")
+  status     Int       @default(1) @map("status")
+  syncTime   Int       @default(0) @map("sync_time")
+  updateTime Int       @map("update_time")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime? @default(now()) @updatedAt @map("updated_at")
+  hasHistory Int?      @default(1) @map("has_history")
+  category   String    @default("") @map("category")
+
+  users UserFeed[]
 
   @@map("feeds")
 }
 
 model Article {
-  id          String @id
-  mpId        String @map("mp_id")
-  title       String @map("title")
-  picUrl      String @map("pic_url")
-  publishTime Int    @map("publish_time")
-
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime? @default(now()) @updatedAt @map("updated_at")
+  id          String    @id
+  mpId        String    @map("mp_id")
+  title       String    @map("title")
+  picUrl      String    @map("pic_url")
+  publishTime Int       @map("publish_time")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime? @default(now()) @updatedAt @map("updated_at")
 
   @@map("articles")
 }

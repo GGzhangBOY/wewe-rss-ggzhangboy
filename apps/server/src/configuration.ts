@@ -8,6 +8,10 @@ const configuration = () => {
   );
 
   const authCode = process.env.AUTH_CODE;
+  const adminUsername = process.env.ADMIN_USERNAME || 'admin';
+  const adminPassword = process.env.ADMIN_PASSWORD;
+  const sessionDays = parseInt(`${process.env.SESSION_DAYS || 30}`);
+  const sessionCookieSecure = process.env.SESSION_COOKIE_SECURE === 'true';
   const platformUrl = process.env.PLATFORM_URL || 'https://weread.111965.xyz';
   const originUrl = process.env.SERVER_ORIGIN_URL || '';
 
@@ -28,7 +32,13 @@ const configuration = () => {
   return {
     server: { isProd, port, host },
     throttler: { maxRequestPerMinute },
-    auth: { code: authCode },
+    auth: {
+      code: authCode,
+      adminUsername,
+      adminPassword,
+      sessionDays,
+      sessionCookieSecure,
+    },
     platform: { url: platformUrl },
     feed: {
       originUrl,

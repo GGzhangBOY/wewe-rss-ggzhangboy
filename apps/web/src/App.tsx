@@ -4,6 +4,7 @@ import Login from './pages/login';
 import Accounts from './pages/accounts';
 import Knowledge from './pages/knowledge';
 import KnowledgeIndexing from './pages/knowledge-indexing';
+import Users from './pages/users';
 import { BaseLayout } from './layouts/base';
 import { TrpcProvider } from './provider/trpc';
 import ThemeProvider from './provider/theme';
@@ -20,6 +21,7 @@ function App() {
               <Route path="/knowledge" element={<Knowledge />} />
               <Route path="/knowledge/indexing" element={<KnowledgeIndexing />} />
               <Route path="/accounts" element={<Accounts />} />
+              <Route path="/users" element={<Users />} />
               <Route path="/login" element={<Login />} />
             </Route>
           </Routes>

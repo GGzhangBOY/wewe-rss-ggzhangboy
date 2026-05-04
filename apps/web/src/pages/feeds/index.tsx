@@ -297,7 +297,7 @@ const Feeds = () => {
                     <Tooltip
                       content={
                         inProgressHistoryMp?.id === currentMpInfo.id
-                          ? `正在获取第${inProgressHistoryMp.page}页...`
+                          ? `正在获取第${inProgressHistoryMp?.page}页...`
                           : `历史文章需要分批次拉取，请耐心等候，频繁调用可能会导致一段时间内不可用`
                       }
                       color={

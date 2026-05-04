@@ -22,6 +22,7 @@ import { trpc } from '@web/utils/trpc';
 type ChatMessage = {
   role: 'user' | 'assistant';
   content: string;
+  sources?: Source[];
 };
 
 type Source = {
@@ -42,6 +43,12 @@ type Conversation = {
   updatedAt: number;
   messages: ChatMessage[];
   sources: Source[];
+};
+
+type CategoryOption = {
+  key: string;
+  label: string;
+  count?: number;
 };
 
 const STORAGE_KEY = 'wewe-rss-knowledge-conversations';
@@ -76,13 +83,27 @@ const Knowledge = () => {
     }
     try {
       const parsed = JSON.parse(stored) as Conversation[];
-      const normalized = parsed.map((conversation) => ({
-        ...conversation,
-        category: conversation.category || 'all',
-        useKnowledgeBase: conversation.useKnowledgeBase ?? true,
-        messages: conversation.messages || [],
-        sources: conversation.sources || [],
-      }));
+      const normalized = parsed.map((conversation) => {
+        const messages = conversation.messages || [];
+        return {
+          ...conversation,
+          category: conversation.category || 'all',
+          useKnowledgeBase: conversation.useKnowledgeBase ?? true,
+          messages: messages.map((message, index) => {
+            const isLastAssistant =
+              index === messages.length - 1 && message.role === 'assistant';
+            if (
+              isLastAssistant &&
+              !message.sources?.length &&
+              conversation.sources?.length
+            ) {
+              return { ...message, sources: conversation.sources };
+            }
+            return message;
+          }),
+          sources: [],
+        };
+      });
       if (normalized.length) {
         setConversations(normalized);
         setActiveId(normalized[0].id);
@@ -101,13 +122,39 @@ const Knowledge = () => {
   const activeConversation =
     conversations.find((item) => item.id === activeId) || conversations[0];
 
-  const categories = useMemo(() => {
+  const categories = useMemo<CategoryOption[]>(() => {
+    const indexedCategories = (stats?.categories || [])
+      .filter((item) => item.category)
+      .map((item) => ({
+        key: item.category,
+        label: item.category,
+        count: item.count,
+      }));
+
+    if (indexedCategories.length) {
+      return [
+        {
+          key: 'all',
+          label: '全部分类',
+          count: stats?.totalChunks || 0,
+        },
+        ...indexedCategories,
+      ];
+    }
+
     const values = new Set<string>();
     (feedData?.items || []).forEach((item) => {
       values.add(item.category || '未分类');
     });
-    return ['all', ...Array.from(values)];
-  }, [feedData?.items]);
+    return [
+      { key: 'all', label: '全部分类' },
+      ...Array.from(values).map((item) => ({ key: item, label: item })),
+    ];
+  }, [feedData?.items, stats?.categories, stats?.totalChunks]);
+
+  const activeCategory = categories.some((item) => item.key === category)
+    ? category
+    : 'all';
 
   const updateConversation = (
     id: string,
@@ -138,6 +185,15 @@ const Knowledge = () => {
     setCategory(conversation.category || 'all');
     setUseKnowledgeBase(conversation.useKnowledgeBase ?? true);
     setQuestion('');
+  };
+
+  const handleCategoryChange = (selectedCategory: string) => {
+    setCategory(selectedCategory);
+    updateConversation(activeId, (conversation) => ({
+      ...conversation,
+      category: selectedCategory,
+      updatedAt: Date.now(),
+    }));
   };
 
   const handleClearConversation = () => {
@@ -199,7 +255,8 @@ const Knowledge = () => {
     const history = activeConversation.messages.slice(-12);
     const result = await ask({
       question: text,
-      category: useKnowledgeBase && category !== 'all' ? category : undefined,
+      category:
+        useKnowledgeBase && activeCategory !== 'all' ? activeCategory : undefined,
       limit: 8,
       useKnowledgeBase,
       history,
@@ -208,15 +265,19 @@ const Knowledge = () => {
     updateConversation(activeId, (conversation) => ({
       ...conversation,
       title: conversation.messages.length ? conversation.title : text.slice(0, 28),
-      category,
+      category: activeCategory,
       useKnowledgeBase,
       updatedAt: Date.now(),
       messages: [
         ...conversation.messages,
         { role: 'user', content: text },
-        { role: 'assistant', content: result.answer },
+        {
+          role: 'assistant',
+          content: result.answer,
+          sources: useKnowledgeBase ? result.sources : [],
+        },
       ],
-      sources: useKnowledgeBase ? result.sources : [],
+      sources: [],
     }));
     setQuestion('');
   };
@@ -292,17 +353,19 @@ const Knowledge = () => {
             <div className="flex items-center gap-2">
               <Select
                 aria-label="分类"
-                className="w-40"
+                className="w-52"
                 isDisabled={!useKnowledgeBase}
-                selectedKeys={[category]}
+                selectedKeys={[activeCategory]}
                 size="sm"
                 onSelectionChange={(keys) =>
-                  setCategory(Array.from(keys)[0] as string)
+                  handleCategoryChange(Array.from(keys)[0] as string)
                 }
               >
                 {categories.map((item) => (
-                  <SelectItem key={item}>
-                    {item === 'all' ? '全部分类' : item}
+                  <SelectItem key={item.key} textValue={item.label}>
+                    {item.count === undefined
+                      ? item.label
+                      : `${item.label} (${item.count})`}
                   </SelectItem>
                 ))}
               </Select>
@@ -327,13 +390,59 @@ const Knowledge = () => {
                   key={`${message.role}-${index}`}
                 >
                   <div
-                    className={`max-w-[86%] whitespace-pre-wrap rounded-small p-3 text-sm leading-6 ${
+                    className={`max-w-[86%] rounded-small p-3 text-sm leading-6 ${
                       message.role === 'user'
                         ? 'bg-primary text-primary-foreground'
                         : 'bg-default-100'
                     }`}
                   >
-                    {message.content}
+                    <div className="whitespace-pre-wrap">{message.content}</div>
+                    {message.role === 'assistant' && !!message.sources?.length && (
+                      <Accordion
+                        className="mt-3 px-0"
+                        itemClasses={{
+                          base: 'px-0',
+                          title: 'text-sm font-medium',
+                          trigger: 'py-2',
+                          content: 'pt-0',
+                        }}
+                        variant="light"
+                      >
+                        <AccordionItem
+                          key="sources"
+                          aria-label="引用来源"
+                          subtitle={`${message.sources.length} 条来源`}
+                          title="引用来源"
+                        >
+                          <div className="space-y-2">
+                            {message.sources.map((source, sourceIndex) => (
+                              <div
+                                className="rounded-small border border-default-200 bg-background/40 p-3 text-sm"
+                                key={`${source.url}-${sourceIndex}`}
+                              >
+                                <div className="mb-1 flex items-center gap-2">
+                                  <Chip size="sm" variant="flat">
+                                    {(source.score * 100).toFixed(1)}
+                                  </Chip>
+                                  <Link href={source.url} target="_blank">
+                                    {source.title}
+                                  </Link>
+                                </div>
+                                <div className="mb-2 text-xs text-default-500">
+                                  {source.source} / {source.category} /{' '}
+                                  {dayjs(source.publishedAt * 1000).format(
+                                    'YYYY-MM-DD',
+                                  )}
+                                </div>
+                                <div className="text-default-600">
+                                  {source.excerpt}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </AccordionItem>
+                      </Accordion>
+                    )}
                   </div>
                 </div>
               ))}
@@ -364,52 +473,6 @@ const Knowledge = () => {
                 提问
               </Button>
             </div>
-
-            {!!activeConversation.sources.length && (
-              <>
-                <Divider />
-                <Accordion
-                  className="px-0"
-                  itemClasses={{
-                    base: 'px-0',
-                    title: 'text-sm font-medium',
-                    trigger: 'py-2',
-                    content: 'pt-0',
-                  }}
-                  variant="light"
-                >
-                  <AccordionItem
-                    key="recent-sources"
-                    aria-label="最近引用来源"
-                    subtitle={`${activeConversation.sources.length} 条来源`}
-                    title="最近引用来源"
-                  >
-                    <div className="space-y-3">
-                      {activeConversation.sources.map((source, index) => (
-                        <div
-                          className="rounded-small border border-default-200 p-3 text-sm"
-                          key={`${source.url}-${index}`}
-                        >
-                          <div className="mb-1 flex items-center gap-2">
-                            <Chip size="sm" variant="flat">
-                              {(source.score * 100).toFixed(1)}
-                            </Chip>
-                            <Link href={source.url} target="_blank">
-                              {source.title}
-                            </Link>
-                          </div>
-                          <div className="mb-2 text-xs text-default-500">
-                            {source.source} / {source.category} /{' '}
-                            {dayjs(source.publishedAt * 1000).format('YYYY-MM-DD')}
-                          </div>
-                          <div className="text-default-600">{source.excerpt}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </AccordionItem>
-                </Accordion>
-              </>
-            )}
           </CardBody>
         </Card>
       </div>
