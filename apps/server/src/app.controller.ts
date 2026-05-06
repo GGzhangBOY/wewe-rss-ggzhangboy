@@ -1,5 +1,4 @@
-import { Controller, Get, Response, Render } from '@nestjs/common';
-import { AppService } from './app.service';
+import { Controller, Get, Redirect, Response, Render } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from './configuration';
 import { Response as Res } from 'express';
@@ -7,13 +6,13 @@ import { Response as Res } from 'express';
 @Controller()
 export class AppController {
   constructor(
-    private readonly appService: AppService,
     private readonly configService: ConfigService,
   ) {}
 
   @Get()
-  getHello(): string {
-    return this.appService.getHello();
+  @Redirect('/dash/login', 302)
+  getHello() {
+    return;
   }
 
   @Get('/robots.txt')
@@ -35,11 +34,10 @@ export class AppController {
   dashRender() {
     const { originUrl: weweRssServerOriginUrl } =
       this.configService.get<ConfigurationType['feed']>('feed')!;
-    const { code } = this.configService.get<ConfigurationType['auth']>('auth')!;
 
     return {
       weweRssServerOriginUrl,
-      enabledAuthCode: !!code,
+      enabledAuthCode: false,
       iconUrl: weweRssServerOriginUrl
         ? `${weweRssServerOriginUrl}/favicon.ico`
         : 'https://r2-assets.111965.xyz/wewe-rss.png',

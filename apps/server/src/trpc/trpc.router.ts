@@ -5,8 +5,6 @@ import * as trpcExpress from '@trpc/server/adapters/express';
 import { TRPCError } from '@trpc/server';
 import { PrismaService } from '@server/prisma/prisma.service';
 import { statusMap } from '@server/constants';
-import { ConfigService } from '@nestjs/config';
-import { ConfigurationType } from '@server/configuration';
 import { RagService } from '@server/rag/rag.service';
 import { AuthService } from '@server/auth/auth.service';
 
@@ -15,7 +13,6 @@ export class TrpcRouter {
   constructor(
     private readonly trpcService: TrpcService,
     private readonly prismaService: PrismaService,
-    private readonly configService: ConfigService,
     private readonly ragService: RagService,
     private readonly authService: AuthService,
   ) {}
@@ -28,21 +25,12 @@ export class TrpcRouter {
       return userId as string;
     }
 
-    if (ctx.legacyAuth) {
-      const adminUser = await this.authService.ensureConfiguredAdminUser();
-      return adminUser.id;
-    }
-
     throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Please sign in' });
   }
 
   private async requireAdmin(ctx: any) {
     if (ctx.user?.role === 'admin') {
       return ctx.user;
-    }
-
-    if (ctx.legacyAuth) {
-      return this.authService.ensureConfiguredAdminUser();
     }
 
     throw new TRPCError({
@@ -699,7 +687,7 @@ export class TrpcRouter {
     createContentJobs: this.trpcService.protectedProcedure
       .input(
         z.object({
-          limit: z.number().min(1).max(500).default(30),
+          limit: z.number().min(1).max(500).optional(),
           category: z.string().optional(),
           onlyMissingContent: z.boolean().default(true),
         }),
@@ -754,7 +742,7 @@ export class TrpcRouter {
     reindex: this.trpcService.protectedProcedure
       .input(
         z.object({
-          limit: z.number().min(1).max(400).default(30),
+          limit: z.number().min(1).max(400).optional(),
           includeFullText: z.boolean().default(true),
           category: z.string().optional(),
         }),
@@ -768,6 +756,7 @@ export class TrpcRouter {
         z.object({
           question: z.string().min(1).max(1000),
           category: z.string().optional(),
+          categories: z.array(z.string().min(1)).max(30).optional(),
           limit: z.number().min(1).max(12).default(8),
           useKnowledgeBase: z.boolean().default(true),
           history: z
@@ -802,8 +791,6 @@ export class TrpcRouter {
       trpcExpress.createExpressMiddleware({
         router: this.appRouter,
         createContext: async ({ req, res }) => {
-          const authCode =
-            this.configService.get<ConfigurationType['auth']>('auth')!.code;
           const sessionToken = this.authService.getSessionTokenFromRequest(req);
           const user =
             await this.authService.getUserFromSessionToken(sessionToken);
@@ -811,19 +798,14 @@ export class TrpcRouter {
           if (user) {
             return {
               errorMsg: null,
-              legacyAuth: false,
               sessionToken,
               user,
               res,
             };
           }
 
-          const legacyAuth =
-            !!authCode && req.headers.authorization === authCode;
-
           return {
-            errorMsg: legacyAuth || !authCode ? null : 'Please sign in',
-            legacyAuth,
+            errorMsg: 'Please sign in',
             sessionToken: null,
             user: null,
             res,

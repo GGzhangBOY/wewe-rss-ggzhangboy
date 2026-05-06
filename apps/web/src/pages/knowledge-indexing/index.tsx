@@ -5,7 +5,6 @@ import {
   CardHeader,
   Chip,
   Divider,
-  Input,
   Link,
   Progress,
   Select,
@@ -28,7 +27,6 @@ const metricClass = 'text-2xl font-semibold';
 
 const KnowledgeIndexing = () => {
   const [category, setCategory] = useState('all');
-  const [indexLimit, setIndexLimit] = useState(30);
   const [includeFullText, setIncludeFullText] = useState(true);
 
   const { data: feedData } = trpc.feed.list.useQuery({});
@@ -51,12 +49,10 @@ const KnowledgeIndexing = () => {
 
   const handleIndexAndCreateJobs = async () => {
     const result = await reindex({
-      limit: indexLimit,
       includeFullText,
       category: category === 'all' ? undefined : category,
     });
     const jobs = await createContentJobs({
-      limit: indexLimit,
       category: category === 'all' ? undefined : category,
       onlyMissingContent: true,
     });
@@ -105,16 +101,6 @@ const KnowledgeIndexing = () => {
                 </SelectItem>
               ))}
             </Select>
-            <Input
-              type="number"
-              label="本次索引文章数"
-              min={1}
-              max={400}
-              value={`${indexLimit}`}
-              onValueChange={(value) =>
-                setIndexLimit(Math.min(400, Math.max(1, Number(value || 30))))
-              }
-            />
             <Switch isSelected={includeFullText} onValueChange={setIncludeFullText}>
               抓取正文
             </Switch>

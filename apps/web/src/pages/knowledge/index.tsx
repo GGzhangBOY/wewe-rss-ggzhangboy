@@ -38,7 +38,8 @@ type Source = {
 type Conversation = {
   id: string;
   title: string;
-  category: string;
+  category?: string;
+  categories?: string[];
   useKnowledgeBase: boolean;
   updatedAt: number;
   messages: ChatMessage[];
@@ -56,16 +57,28 @@ const STORAGE_KEY = 'wewe-rss-knowledge-conversations';
 const createConversation = (): Conversation => ({
   id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
   title: '新对话',
-  category: 'all',
+  categories: ['all'],
   useKnowledgeBase: true,
   updatedAt: Date.now(),
   messages: [],
   sources: [],
 });
 
+const normalizeConversationCategories = (
+  categories?: string[],
+  legacyCategory?: string,
+) => {
+  const selected = (categories?.length ? categories : [legacyCategory || 'all'])
+    .filter(Boolean)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const withoutAll = selected.filter((item) => item !== 'all');
+  return withoutAll.length ? Array.from(new Set(withoutAll)) : ['all'];
+};
+
 const Knowledge = () => {
   const [question, setQuestion] = useState('');
-  const [category, setCategory] = useState('all');
+  const [selectedCategories, setSelectedCategories] = useState<string[]>(['all']);
   const [useKnowledgeBase, setUseKnowledgeBase] = useState(true);
   const [conversations, setConversations] = useState<Conversation[]>([
     createConversation(),
@@ -87,7 +100,10 @@ const Knowledge = () => {
         const messages = conversation.messages || [];
         return {
           ...conversation,
-          category: conversation.category || 'all',
+          categories: normalizeConversationCategories(
+            conversation.categories,
+            conversation.category,
+          ),
           useKnowledgeBase: conversation.useKnowledgeBase ?? true,
           messages: messages.map((message, index) => {
             const isLastAssistant =
@@ -107,7 +123,12 @@ const Knowledge = () => {
       if (normalized.length) {
         setConversations(normalized);
         setActiveId(normalized[0].id);
-        setCategory(normalized[0].category || 'all');
+        setSelectedCategories(
+          normalizeConversationCategories(
+            normalized[0].categories,
+            normalized[0].category,
+          ),
+        );
         setUseKnowledgeBase(normalized[0].useKnowledgeBase ?? true);
       }
     } catch {
@@ -132,29 +153,24 @@ const Knowledge = () => {
       }));
 
     if (indexedCategories.length) {
-      return [
-        {
-          key: 'all',
-          label: '全部分类',
-          count: stats?.totalChunks || 0,
-        },
-        ...indexedCategories,
-      ];
+      return indexedCategories;
     }
 
     const values = new Set<string>();
     (feedData?.items || []).forEach((item) => {
       values.add(item.category || '未分类');
     });
-    return [
-      { key: 'all', label: '全部分类' },
-      ...Array.from(values).map((item) => ({ key: item, label: item })),
-    ];
+    return Array.from(values).map((item) => ({ key: item, label: item }));
   }, [feedData?.items, stats?.categories, stats?.totalChunks]);
 
-  const activeCategory = categories.some((item) => item.key === category)
-    ? category
-    : 'all';
+  const activeCategories = selectedCategories.filter((category) =>
+    categories.some((item) => item.key === category),
+  );
+  const effectiveCategories = activeCategories.length
+    ? activeCategories
+    : ['all'];
+  const selectedCategoryKeys =
+    effectiveCategories[0] === 'all' ? [] : effectiveCategories;
 
   const updateConversation = (
     id: string,
@@ -171,7 +187,7 @@ const Knowledge = () => {
     const next = createConversation();
     setConversations((items) => [next, ...items]);
     setActiveId(next.id);
-    setCategory('all');
+    setSelectedCategories(['all']);
     setUseKnowledgeBase(true);
     setQuestion('');
   };
@@ -182,16 +198,22 @@ const Knowledge = () => {
       return;
     }
     setActiveId(id);
-    setCategory(conversation.category || 'all');
+    setSelectedCategories(
+      normalizeConversationCategories(
+        conversation.categories,
+        conversation.category,
+      ),
+    );
     setUseKnowledgeBase(conversation.useKnowledgeBase ?? true);
     setQuestion('');
   };
 
-  const handleCategoryChange = (selectedCategory: string) => {
-    setCategory(selectedCategory);
+  const handleCategoryChange = (nextCategories: string[]) => {
+    const normalized = normalizeConversationCategories(nextCategories);
+    setSelectedCategories(normalized);
     updateConversation(activeId, (conversation) => ({
       ...conversation,
-      category: selectedCategory,
+      categories: normalized,
       updatedAt: Date.now(),
     }));
   };
@@ -212,7 +234,7 @@ const Knowledge = () => {
       const next = createConversation();
       setConversations([next]);
       setActiveId(next.id);
-      setCategory('all');
+      setSelectedCategories(['all']);
       setUseKnowledgeBase(true);
       setQuestion('');
       toast.success('对话已删除');
@@ -223,7 +245,9 @@ const Knowledge = () => {
     if (id === activeId) {
       const next = nextConversations[0];
       setActiveId(next.id);
-      setCategory(next.category || 'all');
+      setSelectedCategories(
+        normalizeConversationCategories(next.categories, next.category),
+      );
       setUseKnowledgeBase(next.useKnowledgeBase ?? true);
       setQuestion('');
     }
@@ -255,8 +279,10 @@ const Knowledge = () => {
     const history = activeConversation.messages.slice(-12);
     const result = await ask({
       question: text,
-      category:
-        useKnowledgeBase && activeCategory !== 'all' ? activeCategory : undefined,
+      categories:
+        useKnowledgeBase && effectiveCategories[0] !== 'all'
+          ? effectiveCategories
+          : undefined,
       limit: 8,
       useKnowledgeBase,
       history,
@@ -265,7 +291,7 @@ const Knowledge = () => {
     updateConversation(activeId, (conversation) => ({
       ...conversation,
       title: conversation.messages.length ? conversation.title : text.slice(0, 28),
-      category: activeCategory,
+      categories: effectiveCategories,
       useKnowledgeBase,
       updatedAt: Date.now(),
       messages: [
@@ -353,12 +379,16 @@ const Knowledge = () => {
             <div className="flex items-center gap-2">
               <Select
                 aria-label="分类"
-                className="w-52"
+                className="w-64"
                 isDisabled={!useKnowledgeBase}
-                selectedKeys={[activeCategory]}
+                placeholder="全部分类"
+                selectedKeys={selectedCategoryKeys}
+                selectionMode="multiple"
                 size="sm"
                 onSelectionChange={(keys) =>
-                  handleCategoryChange(Array.from(keys)[0] as string)
+                  handleCategoryChange(
+                    keys === 'all' ? categories.map((item) => item.key) : Array.from(keys as Set<string>),
+                  )
                 }
               >
                 {categories.map((item) => (

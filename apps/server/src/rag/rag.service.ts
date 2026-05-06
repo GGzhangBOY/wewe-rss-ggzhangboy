@@ -143,7 +143,7 @@ export class RagService {
 
   async reindex({
     userId,
-    limit = 30,
+    limit,
     includeFullText = true,
     category,
   }: {
@@ -261,6 +261,7 @@ export class RagService {
     userId,
     question,
     category,
+    categories,
     limit = 8,
     history = [],
     useKnowledgeBase = true,
@@ -268,6 +269,7 @@ export class RagService {
     userId?: string;
     question: string;
     category?: string;
+    categories?: string[];
     limit?: number;
     history?: ChatHistoryMessage[];
     useKnowledgeBase?: boolean;
@@ -285,7 +287,16 @@ export class RagService {
     }
 
     const searchText = this.buildSearchText(question, history);
-    const chunks = await this.search(searchText, { userId, category, limit });
+    const selectedCategories = categories?.length
+      ? categories
+      : category
+        ? [category]
+        : undefined;
+    const chunks = await this.search(searchText, {
+      userId,
+      categories: selectedCategories,
+      limit,
+    });
 
     if (!chunks.length) {
       return {
@@ -340,7 +351,7 @@ export class RagService {
 
   async createContentJobs({
     userId,
-    limit = 30,
+    limit,
     category,
     onlyMissingContent = true,
   }: {
@@ -952,9 +963,9 @@ export class RagService {
     question: string,
     {
       userId,
-      category,
+      categories,
       limit,
-    }: { userId?: string; category?: string; limit: number },
+    }: { userId?: string; categories?: string[]; limit: number },
   ) {
     const feeds = await this.getSubscribedFeeds(userId);
     const feedIds = feeds.map((feed) => feed.id);
@@ -963,10 +974,12 @@ export class RagService {
     }
     const placeholders = feedIds.map(() => '?').join(',');
     const queryVector = this.embedText(question);
-    const rows = category
+    const selectedCategories = Array.from(new Set(categories || [])).filter(Boolean);
+    const categoryPlaceholders = selectedCategories.map(() => '?').join(',');
+    const rows = selectedCategories.length
       ? await this.prismaService.$queryRawUnsafe<RagChunk[]>(
-          `SELECT * FROM rag_chunks WHERE category = ? AND mp_id IN (${placeholders}) ORDER BY published_at DESC LIMIT 600`,
-          category,
+          `SELECT * FROM rag_chunks WHERE category IN (${categoryPlaceholders}) AND mp_id IN (${placeholders}) ORDER BY published_at DESC LIMIT 600`,
+          ...selectedCategories,
           ...feedIds,
         )
       : await this.prismaService.$queryRawUnsafe<RagChunk[]>(

@@ -24,8 +24,7 @@ export class TrpcService {
   protectedProcedure = this.trpc.procedure.use(({ ctx, next }) => {
     const errorMsg = (ctx as any).errorMsg;
     const user = (ctx as any).user;
-    const legacyAuth = (ctx as any).legacyAuth;
-    if (errorMsg || (!user && !legacyAuth)) {
+    if (errorMsg || !user) {
       throw new TRPCError({
         code: 'UNAUTHORIZED',
         message: errorMsg || 'Please sign in',
