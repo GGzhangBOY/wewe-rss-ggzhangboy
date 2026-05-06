@@ -55,6 +55,7 @@ type ArticleContentJob = {
 
 const VECTOR_DIMS = 384;
 const MAX_CONTEXT_CHARS = 9000;
+const MAX_ANSWER_TOKENS = 3000;
 
 @Injectable()
 export class RagService {
@@ -192,69 +193,91 @@ export class RagService {
     let indexedChunks = 0;
 
     for (const article of articles) {
-      const feed = feedMap.get(article.mpId);
-      const mpName = feed?.mpName || article.mpId;
-      const feedCategory = feed?.category || '未分类';
-      const sourceUrl = `https://mp.weixin.qq.com/s/${article.id}`;
       const storedContent = contents.get(article.id);
       const body =
         includeFullText && storedContent?.fetch_status === 'success'
           ? storedContent.content
           : '';
-
-      const baseContent = [
-        `标题：${article.title}`,
-        `公众号：${mpName}`,
-        `分类：${feedCategory}`,
-        feed?.mpIntro ? `公众号简介：${feed.mpIntro}` : '',
-        body ? `正文：\n${body}` : '',
-      ]
-        .filter(Boolean)
-        .join('\n\n');
-
-      const chunks = this.chunkText(baseContent);
-      const now = new Date().toISOString();
-      await this.prismaService.$executeRawUnsafe(
-        `DELETE FROM rag_chunks WHERE article_id = ?`,
-        article.id,
+      indexedChunks += await this.indexArticle(
+        article,
+        feedMap.get(article.mpId),
+        body,
       );
-
-      for (let index = 0; index < chunks.length; index += 1) {
-        const content = chunks[index];
-        const id = `${article.id}:${index}`;
-        const vector = JSON.stringify(this.embedText(content));
-        const contentHash = this.hash(content);
-
-        await this.prismaService.$executeRawUnsafe(
-          `
-            INSERT INTO rag_chunks (
-              id, article_id, chunk_index, title, mp_id, mp_name, category,
-              source_url, published_at, content, vector, content_hash,
-              created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `,
-          id,
-          article.id,
-          index,
-          article.title,
-          article.mpId,
-          mpName,
-          feedCategory,
-          sourceUrl,
-          article.publishTime,
-          content,
-          vector,
-          contentHash,
-          now,
-          now,
-        );
-        indexedChunks += 1;
-      }
       indexedArticles += 1;
     }
 
     const total = await this.countChunks(feedIds);
     return { indexedArticles, indexedChunks, totalChunks: total };
+  }
+
+  private async indexArticle(
+    article: {
+      id: string;
+      mpId: string;
+      title: string;
+      publishTime: number;
+    },
+    feed:
+      | {
+          mpName: string;
+          mpIntro: string;
+          category: string;
+        }
+      | undefined,
+    body = '',
+  ) {
+    const mpName = feed?.mpName || article.mpId;
+    const feedCategory = feed?.category || '未分类';
+    const sourceUrl = `https://mp.weixin.qq.com/s/${article.id}`;
+    const baseContent = [
+      `标题：${article.title}`,
+      `公众号：${mpName}`,
+      `分类：${feedCategory}`,
+      feed?.mpIntro ? `公众号简介：${feed.mpIntro}` : '',
+      body ? `正文：\n${body}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+    const chunks = this.chunkText(baseContent);
+    const now = new Date().toISOString();
+    await this.prismaService.$executeRawUnsafe(
+      `DELETE FROM rag_chunks WHERE article_id = ?`,
+      article.id,
+    );
+
+    for (let index = 0; index < chunks.length; index += 1) {
+      const content = chunks[index];
+      const id = `${article.id}:${index}`;
+      const vector = JSON.stringify(this.embedText(content));
+      const contentHash = this.hash(content);
+
+      await this.prismaService.$executeRawUnsafe(
+        `
+          INSERT INTO rag_chunks (
+            id, article_id, chunk_index, title, mp_id, mp_name, category,
+            source_url, published_at, content, vector, content_hash,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        id,
+        article.id,
+        index,
+        article.title,
+        article.mpId,
+        mpName,
+        feedCategory,
+        sourceUrl,
+        article.publishTime,
+        content,
+        vector,
+        contentHash,
+        now,
+        now,
+      );
+    }
+
+    return chunks.length;
   }
 
   async ask({
@@ -627,6 +650,18 @@ export class RagService {
       jobId,
     );
 
+    if (status === 'success') {
+      const article = await this.prismaService.article.findUnique({
+        where: { id: articleId },
+      });
+      if (article) {
+        const feed = await this.prismaService.feed.findUnique({
+          where: { id: article.mpId },
+        });
+        await this.indexArticle(article, feed || undefined, normalized);
+      }
+    }
+
     return { articleId, status, contentLength: length };
   }
 
@@ -813,9 +848,15 @@ export class RagService {
     `,
       ...feedIds,
     );
-    const contents = await this.prismaService.$queryRawUnsafe<ArticleContent[]>(
-      `SELECT * FROM article_contents`,
-    );
+    const articleIds = articles.map((article) => article.id);
+    const contents = articleIds.length
+      ? await this.prismaService.$queryRawUnsafe<ArticleContent[]>(
+          `SELECT * FROM article_contents WHERE article_id IN (${articleIds
+            .map(() => '?')
+            .join(',')})`,
+          ...articleIds,
+        )
+      : [];
 
     const feedMap = new Map(feeds.map((feed) => [feed.id, feed]));
     const chunkMap = new Map(chunks.map((chunk) => [chunk.article_id, chunk]));
@@ -894,8 +935,8 @@ export class RagService {
 
     const totalArticles = articles.length;
     const indexedArticles = chunks.length;
-    const fullTextArticles = contents.filter(
-      (content) => content.fetch_status === 'success',
+    const fullTextArticles = articles.filter(
+      (article) => contentMap.get(article.id)?.fetch_status === 'success',
     ).length;
     const titleOnlyArticles = chunks.filter(
       (chunk) =>
@@ -1148,7 +1189,7 @@ export class RagService {
         model: ragConfig.minimaxModel,
         messages,
         temperature: 0.2,
-        max_tokens: 1200,
+        max_tokens: MAX_ANSWER_TOKENS,
       },
       {
         timeout: 60_000,
@@ -1201,7 +1242,7 @@ export class RagService {
       {
         role: 'system',
         content:
-          '你是公众号知识库问答助手。优先根据用户提供的资料回答，并在关键结论后标注资料编号。资料可能只有标题、来源和链接；如果标题已经足以定位相关条目，请先给出最相关条目，再说明资料未提供更多正文细节。不要把“环境异常”“去验证”“无法访问”等反爬提示当作正文依据。',
+          '你是公众号知识库问答助手。优先根据用户提供的资料回答，并在关键结论后标注资料编号。资料可能只有标题、来源和链接；如果标题已经足以定位相关条目，请先给出最相关条目，再说明资料未提供更多正文细节。不要把“环境异常”“去验证”“无法访问”等反爬提示当作正文依据。必须输出完整答案，不要在句子、列表项或 Markdown 标记中间结束；如果内容过长，优先压缩要点，保证结尾完整。',
       },
       ...historyMessages,
       {

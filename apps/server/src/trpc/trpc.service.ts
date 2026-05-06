@@ -119,24 +119,38 @@ export class TrpcService {
 
   private async getAvailableAccount(userId?: string) {
     const disabledAccounts = this.getBlockedAccountIds();
-    const account = await this.prismaService.account.findMany({
-      where: {
-        status: statusMap.ENABLE,
-        ...(userId ? { userId } : {}),
-        NOT: {
-          id: { in: disabledAccounts },
-        },
-      },
-      take: 10,
-    });
+    const accounts = userId
+      ? (
+          await this.prismaService.accountUser.findMany({
+            where: {
+              userId,
+              account: {
+                status: statusMap.ENABLE,
+                NOT: {
+                  id: { in: disabledAccounts },
+                },
+              },
+            },
+            include: { account: true },
+            take: 10,
+          })
+        ).map((item) => item.account)
+      : await this.prismaService.account.findMany({
+          where: {
+            status: statusMap.ENABLE,
+            NOT: {
+              id: { in: disabledAccounts },
+            },
+          },
+          take: 10,
+        });
 
-    if (!account || account.length === 0) {
-      throw new Error('暂无可用读书账号!');
+    if (!accounts || accounts.length === 0) {
+      throw new Error('鏆傛棤鍙敤璇讳功璐﹀彿!');
     }
 
-    return account[Math.floor(Math.random() * account.length)];
+    return accounts[Math.floor(Math.random() * accounts.length)];
   }
-
   async getMpArticles(
     mpId: string,
     page = 1,

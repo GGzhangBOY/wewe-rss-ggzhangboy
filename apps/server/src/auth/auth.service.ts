@@ -215,10 +215,23 @@ export class AuthService {
   }
 
   private async bootstrapAdminData(userId: string) {
-    await this.prismaService.account.updateMany({
-      where: { userId: null },
-      data: { userId },
-    });
+    const accounts = await this.prismaService.account.findMany();
+    if (accounts.length) {
+      await this.prismaService.$transaction(
+        accounts.map((account) =>
+          this.prismaService.accountUser.upsert({
+            where: {
+              userId_accountId: { userId, accountId: account.id },
+            },
+            update: {},
+            create: {
+              userId,
+              accountId: account.id,
+            },
+          }),
+        ),
+      );
+    }
 
     const existingSubscriptions = await this.prismaService.userFeed.count({
       where: { userId },

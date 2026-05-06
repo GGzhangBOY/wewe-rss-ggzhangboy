@@ -13,11 +13,12 @@ model Account {
   token     String    @map("token") @db.VarChar(2048)
   name      String    @map("name") @db.VarChar(1024)
   status    Int       @default(1) @map("status") @db.Int()
+  // Legacy owner column kept for migration compatibility. Use AccountUser for access.
   userId    String?   @map("user_id") @db.VarChar(36)
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime? @default(now()) @updatedAt @map("updated_at")
 
-  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  users AccountUser[]
 
   @@index([userId])
   @@map("accounts")
@@ -31,7 +32,7 @@ model User {
   createdAt    DateTime  @default(now()) @map("created_at")
   updatedAt    DateTime? @default(now()) @updatedAt @map("updated_at")
 
-  accounts Account[]
+  accounts AccountUser[]
   feeds    UserFeed[]
   sessions Session[]
 
@@ -50,6 +51,20 @@ model Session {
   @@index([userId])
   @@index([expiresAt])
   @@map("sessions")
+}
+
+model AccountUser {
+  userId    String    @map("user_id") @db.VarChar(36)
+  accountId String    @map("account_id") @db.VarChar(255)
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime? @default(now()) @updatedAt @map("updated_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@id([userId, accountId])
+  @@index([accountId])
+  @@map("account_users")
 }
 
 model UserFeed {

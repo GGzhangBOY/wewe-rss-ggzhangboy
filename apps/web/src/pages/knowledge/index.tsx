@@ -15,7 +15,7 @@ import {
   Textarea,
 } from '@nextui-org/react';
 import dayjs from 'dayjs';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import { trpc } from '@web/utils/trpc';
 
@@ -74,6 +74,47 @@ const normalizeConversationCategories = (
     .filter(Boolean);
   const withoutAll = selected.filter((item) => item !== 'all');
   return withoutAll.length ? Array.from(new Set(withoutAll)) : ['all'];
+};
+
+const renderMessageContent = (content: string, sources?: Source[]) => {
+  if (!sources?.length) {
+    return content;
+  }
+
+  const citationPattern = /(资料\s*(\d+)|\[(\d+)\])/g;
+  const nodes: ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = citationPattern.exec(content))) {
+    const sourceIndex = Number(match[2] || match[3]) - 1;
+    const source = sources[sourceIndex];
+    if (!source) {
+      continue;
+    }
+
+    if (match.index > lastIndex) {
+      nodes.push(content.slice(lastIndex, match.index));
+    }
+
+    nodes.push(
+      <Link
+        className="inline text-primary underline underline-offset-2"
+        href={source.url}
+        key={`${match.index}-${match[0]}`}
+        target="_blank"
+      >
+        {match[0]}
+      </Link>,
+    );
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < content.length) {
+    nodes.push(content.slice(lastIndex));
+  }
+
+  return nodes.length ? nodes : content;
 };
 
 const Knowledge = () => {
@@ -277,35 +318,46 @@ const Knowledge = () => {
     }
 
     const history = activeConversation.messages.slice(-12);
+    const nextCategories = effectiveCategories;
+    const nextUseKnowledgeBase = useKnowledgeBase;
+    updateConversation(activeId, (conversation) => ({
+      ...conversation,
+      title: conversation.messages.length ? conversation.title : text.slice(0, 28),
+      categories: nextCategories,
+      useKnowledgeBase: nextUseKnowledgeBase,
+      updatedAt: Date.now(),
+      messages: [
+        ...conversation.messages,
+        { role: 'user', content: text },
+      ],
+      sources: [],
+    }));
+    setQuestion('');
+
     const result = await ask({
       question: text,
       categories:
-        useKnowledgeBase && effectiveCategories[0] !== 'all'
-          ? effectiveCategories
+        nextUseKnowledgeBase && nextCategories[0] !== 'all'
+          ? nextCategories
           : undefined,
       limit: 8,
-      useKnowledgeBase,
+      useKnowledgeBase: nextUseKnowledgeBase,
       history,
     });
 
     updateConversation(activeId, (conversation) => ({
       ...conversation,
-      title: conversation.messages.length ? conversation.title : text.slice(0, 28),
-      categories: effectiveCategories,
-      useKnowledgeBase,
       updatedAt: Date.now(),
       messages: [
         ...conversation.messages,
-        { role: 'user', content: text },
         {
           role: 'assistant',
           content: result.answer,
-          sources: useKnowledgeBase ? result.sources : [],
+          sources: nextUseKnowledgeBase ? result.sources : [],
         },
       ],
       sources: [],
     }));
-    setQuestion('');
   };
 
   return (
@@ -426,7 +478,9 @@ const Knowledge = () => {
                         : 'bg-default-100'
                     }`}
                   >
-                    <div className="whitespace-pre-wrap">{message.content}</div>
+                    <div className="whitespace-pre-wrap">
+                      {renderMessageContent(message.content, message.sources)}
+                    </div>
                     {message.role === 'assistant' && !!message.sources?.length && (
                       <Accordion
                         className="mt-3 px-0"
@@ -498,8 +552,12 @@ const Knowledge = () => {
               >
                 查询知识库
               </Switch>
-              <Button color="primary" isDisabled={isAsking} onPress={handleAsk}>
-                {isAsking && <Spinner color="white" size="sm" />}
+              <Button
+                color="primary"
+                isDisabled={isAsking}
+                isLoading={isAsking}
+                onPress={handleAsk}
+              >
                 提问
               </Button>
             </div>

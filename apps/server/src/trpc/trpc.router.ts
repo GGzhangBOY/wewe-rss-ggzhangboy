@@ -165,20 +165,24 @@ export class TrpcRouter {
         const limit = input.limit ?? 1000;
         const { cursor } = input;
 
-        const items = await this.prismaService.account.findMany({
+        const accountUsers = await this.prismaService.accountUser.findMany({
           take: limit + 1,
           where: { userId },
-          select: {
-            id: true,
-            name: true,
-            status: true,
-            createdAt: true,
-            updatedAt: true,
-            token: false,
+          include: {
+            account: {
+              select: {
+                id: true,
+                name: true,
+                status: true,
+                createdAt: true,
+                updatedAt: true,
+                token: false,
+              },
+            },
           },
           cursor: cursor
             ? {
-                id: cursor,
+                userId_accountId: { userId, accountId: cursor },
               }
             : undefined,
           orderBy: {
@@ -186,13 +190,14 @@ export class TrpcRouter {
           },
         });
         let nextCursor: typeof cursor | undefined = undefined;
-        if (items.length > limit) {
+        if (accountUsers.length > limit) {
           // Remove the last item and use it as next cursor
 
           // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          const nextItem = items.pop()!;
-          nextCursor = nextItem.id;
+          const nextItem = accountUsers.pop()!;
+          nextCursor = nextItem.accountId;
         }
+        const items = accountUsers.map((item) => item.account);
 
         const disabledAccounts = this.trpcService.getBlockedAccountIds();
         return {
@@ -205,16 +210,17 @@ export class TrpcRouter {
       .input(z.string())
       .query(async ({ input: id, ctx }) => {
         const userId = await this.getCurrentUserId(ctx);
-        const account = await this.prismaService.account.findFirst({
-          where: { id, userId },
+        const accountUser = await this.prismaService.accountUser.findUnique({
+          where: { userId_accountId: { userId, accountId: id } },
+          include: { account: true },
         });
-        if (!account) {
+        if (!accountUser) {
           throw new TRPCError({
             code: 'BAD_REQUEST',
             message: `No account with id '${id}'`,
           });
         }
-        return account;
+        return accountUser.account;
       }),
     add: this.trpcService.protectedProcedure
       .input(
@@ -228,22 +234,22 @@ export class TrpcRouter {
       .mutation(async ({ input, ctx }) => {
         const userId = await this.getCurrentUserId(ctx);
         const { id, ...data } = input;
-        const existingAccount = await this.prismaService.account.findUnique({
-          where: { id },
-          select: { userId: true },
-        });
-        if (existingAccount?.userId && existingAccount.userId !== userId) {
-          throw new TRPCError({
-            code: 'CONFLICT',
-            message: `Account '${id}' belongs to another user`,
-          });
-        }
         const account = await this.prismaService.account.upsert({
           where: {
             id,
           },
-          update: { ...data, userId },
-          create: { ...input, userId },
+          update: data,
+          create: input,
+        });
+        await this.prismaService.accountUser.upsert({
+          where: {
+            userId_accountId: { userId, accountId: id },
+          },
+          update: {},
+          create: {
+            userId,
+            accountId: id,
+          },
         });
         this.trpcService.removeBlockedAccount(id);
 
@@ -263,18 +269,18 @@ export class TrpcRouter {
       .mutation(async ({ input, ctx }) => {
         const userId = await this.getCurrentUserId(ctx);
         const { id, data } = input;
-        const result = await this.prismaService.account.updateMany({
-          where: { id, userId },
-          data,
+        const accountUser = await this.prismaService.accountUser.findUnique({
+          where: { userId_accountId: { userId, accountId: id } },
         });
-        if (result.count < 1) {
+        if (!accountUser) {
           throw new TRPCError({
             code: 'NOT_FOUND',
             message: `No account with id '${id}'`,
           });
         }
-        const account = await this.prismaService.account.findFirstOrThrow({
-          where: { id, userId },
+        const account = await this.prismaService.account.update({
+          where: { id },
+          data,
         });
         this.trpcService.removeBlockedAccount(id);
         return account;
@@ -283,8 +289,23 @@ export class TrpcRouter {
       .input(z.string())
       .mutation(async ({ input: id, ctx }) => {
         const userId = await this.getCurrentUserId(ctx);
-        await this.prismaService.account.deleteMany({ where: { id, userId } });
-        this.trpcService.removeBlockedAccount(id);
+        const result = await this.prismaService.accountUser.deleteMany({
+          where: { userId, accountId: id },
+        });
+        if (result.count < 1) {
+          throw new TRPCError({
+            code: 'NOT_FOUND',
+            message: `No account with id '${id}'`,
+          });
+        }
+
+        const remainingBindings = await this.prismaService.accountUser.count({
+          where: { accountId: id },
+        });
+        if (remainingBindings < 1) {
+          await this.prismaService.account.deleteMany({ where: { id } });
+          this.trpcService.removeBlockedAccount(id);
+        }
 
         return id;
       }),
