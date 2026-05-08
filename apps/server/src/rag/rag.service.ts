@@ -160,29 +160,25 @@ export class RagService {
     }
     const feedIds = feeds.map((feed) => feed.id);
     const placeholders = feedIds.map(() => '?').join(',');
-    if (category) {
-      await this.prismaService.$executeRawUnsafe(
-        `DELETE FROM rag_chunks WHERE category = ? AND mp_id IN (${placeholders})`,
-        category,
-        ...feedIds,
-      );
-    } else {
-      await this.prismaService.$executeRawUnsafe(
-        `DELETE FROM rag_chunks WHERE mp_id IN (${placeholders})`,
-        ...feedIds,
-      );
-    }
-
     const feedMap = new Map(feeds.map((feed) => [feed.id, feed]));
     const filteredFeedIds = category
       ? feeds
-          .filter((feed) => (feed.category || '未分类') === category)
+          .filter((feed) => this.getFeedCategory(feed) === category)
           .map((feed) => feed.id)
       : undefined;
+    const indexFeedIds = filteredFeedIds || feedIds;
+    if (!indexFeedIds.length) {
+      return { indexedArticles: 0, indexedChunks: 0, totalChunks: await this.countChunks(feedIds) };
+    }
+
+    await this.prismaService.$executeRawUnsafe(
+      `DELETE FROM rag_chunks WHERE mp_id IN (${indexFeedIds.map(() => '?').join(',')})`,
+      ...indexFeedIds,
+    );
 
     const articles = await this.prismaService.article.findMany({
       take: limit,
-      where: { mpId: { in: filteredFeedIds || feedIds } },
+      where: { mpId: { in: indexFeedIds } },
       orderBy: { publishTime: 'desc' },
     });
     const contents = await this.getArticleContentMap(
@@ -227,12 +223,10 @@ export class RagService {
     body = '',
   ) {
     const mpName = feed?.mpName || article.mpId;
-    const feedCategory = feed?.category || '未分类';
     const sourceUrl = `https://mp.weixin.qq.com/s/${article.id}`;
     const baseContent = [
       `标题：${article.title}`,
       `公众号：${mpName}`,
-      `分类：${feedCategory}`,
       feed?.mpIntro ? `公众号简介：${feed.mpIntro}` : '',
       body ? `正文：\n${body}` : '',
     ]
@@ -266,7 +260,7 @@ export class RagService {
         article.title,
         article.mpId,
         mpName,
-        feedCategory,
+        '',
         sourceUrl,
         article.publishTime,
         content,
@@ -333,16 +327,17 @@ export class RagService {
     const answer = await this.callMiniMax(question, chunks, history, {
       useKnowledgeBase: true,
     });
+    const categoryByFeedId = await this.getCategoryByFeedId(userId);
     return {
       answer,
       sources: chunks.map((chunk) => ({
         title: chunk.title,
         source: chunk.mp_name,
-        category: chunk.category,
+        category: categoryByFeedId.get(chunk.mp_id) || '未分类',
         url: chunk.source_url,
         publishedAt: chunk.published_at,
         score: chunk.score || 0,
-        excerpt: chunk.content.slice(0, 280),
+        excerpt: this.stripStoredCategoryLine(chunk.content).slice(0, 280),
       })),
       useKnowledgeBase: true,
     };
@@ -358,17 +353,22 @@ export class RagService {
     const placeholders = feedIds.map(() => '?').join(',');
     const totalChunks = await this.countChunks(feedIds);
     const rows = await this.prismaService.$queryRawUnsafe<
-      Array<{ category: string; count: bigint | number }>
+      Array<{ mp_id: string; count: bigint | number }>
     >(
-      `SELECT category, COUNT(*) as count FROM rag_chunks WHERE mp_id IN (${placeholders}) GROUP BY category ORDER BY count DESC`,
+      `SELECT mp_id, COUNT(*) as count FROM rag_chunks WHERE mp_id IN (${placeholders}) GROUP BY mp_id`,
       ...feedIds,
     );
+    const feedMap = new Map(feeds.map((feed) => [feed.id, feed]));
+    const categoryCounts = new Map<string, number>();
+    for (const row of rows) {
+      const category = this.getFeedCategory(feedMap.get(row.mp_id));
+      categoryCounts.set(category, (categoryCounts.get(category) || 0) + Number(row.count));
+    }
     return {
       totalChunks,
-      categories: rows.map((row) => ({
-        category: row.category,
-        count: Number(row.count),
-      })),
+      categories: Array.from(categoryCounts.entries())
+        .map(([category, count]) => ({ category, count }))
+        .sort((a, b) => b.count - a.count),
     };
   }
 
@@ -392,7 +392,7 @@ export class RagService {
     const feedIds = feeds.map((feed) => feed.id);
     const filteredFeedIds = category
       ? feeds
-          .filter((feed) => (feed.category || '未分类') === category)
+          .filter((feed) => this.getFeedCategory(feed) === category)
           .map((feed) => feed.id)
       : undefined;
     const articles = await this.prismaService.article.findMany({
@@ -1009,28 +1009,29 @@ export class RagService {
     }: { userId?: string; categories?: string[]; limit: number },
   ) {
     const feeds = await this.getSubscribedFeeds(userId);
-    const feedIds = feeds.map((feed) => feed.id);
+    const selectedCategories = Array.from(new Set(categories || [])).filter(Boolean);
+    const scopedFeeds = selectedCategories.length
+      ? feeds.filter((feed) => selectedCategories.includes(this.getFeedCategory(feed)))
+      : feeds;
+    const feedIds = scopedFeeds.map((feed) => feed.id);
     if (!feedIds.length) {
       return [];
     }
     const placeholders = feedIds.map(() => '?').join(',');
     const queryVector = this.embedText(question);
-    const selectedCategories = Array.from(new Set(categories || [])).filter(Boolean);
-    const categoryPlaceholders = selectedCategories.map(() => '?').join(',');
-    const rows = selectedCategories.length
-      ? await this.prismaService.$queryRawUnsafe<RagChunk[]>(
-          `SELECT * FROM rag_chunks WHERE category IN (${categoryPlaceholders}) AND mp_id IN (${placeholders}) ORDER BY published_at DESC LIMIT 600`,
-          ...selectedCategories,
-          ...feedIds,
-        )
-      : await this.prismaService.$queryRawUnsafe<RagChunk[]>(
-          `SELECT * FROM rag_chunks WHERE mp_id IN (${placeholders}) ORDER BY published_at DESC LIMIT 800`,
-          ...feedIds,
-        );
+    const categoryByFeedId = new Map(
+      scopedFeeds.map((feed) => [feed.id, this.getFeedCategory(feed)]),
+    );
+    const rows = await this.prismaService.$queryRawUnsafe<RagChunk[]>(
+      `SELECT * FROM rag_chunks WHERE mp_id IN (${placeholders}) ORDER BY published_at DESC LIMIT ?`,
+      ...feedIds,
+      selectedCategories.length ? 600 : 800,
+    );
 
     return rows
       .map((row) => ({
         ...row,
+        category: categoryByFeedId.get(row.mp_id) || '未分类',
         score:
           this.cosine(queryVector, JSON.parse(row.vector)) +
           this.keywordScore(question, row),
@@ -1066,6 +1067,16 @@ export class RagService {
       status: item.status,
       category: item.category,
     }));
+  }
+
+  private getFeedCategory(feed?: { category?: string | null }) {
+    const category = feed?.category?.trim();
+    return category || '未分类';
+  }
+
+  private async getCategoryByFeedId(userId?: string) {
+    const feeds = await this.getSubscribedFeeds(userId);
+    return new Map(feeds.map((feed) => [feed.id, this.getFeedCategory(feed)]));
   }
 
   private async releaseStaleContentJobs() {
@@ -1232,7 +1243,7 @@ export class RagService {
           `分类：${chunk.category}`,
           `发布时间：${published}`,
           `链接：${chunk.source_url}`,
-          `内容：${chunk.content}`,
+          `内容：${this.stripStoredCategoryLine(chunk.content)}`,
         ].join('\n');
       })
       .join('\n\n---\n\n')
@@ -1291,6 +1302,14 @@ export class RagService {
       .replace(/\u00a0/g, ' ')
       .replace(/[ \t]+/g, ' ')
       .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  private stripStoredCategoryLine(text: string) {
+    return text
+      .split('\n')
+      .filter((line) => !/^分类：/.test(line.trim()))
+      .join('\n')
       .trim();
   }
 

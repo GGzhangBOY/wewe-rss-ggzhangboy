@@ -1,5 +1,5 @@
 const DEFAULT_SETTINGS = {
-  serverUrl: 'http://47.121.26.65:4000',
+  serverUrl: '',
   authCode: '',
   collectorId: '',
   intervalSeconds: 3,

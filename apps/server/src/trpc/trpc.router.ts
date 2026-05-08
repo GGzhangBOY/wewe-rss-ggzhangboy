@@ -7,6 +7,23 @@ import { PrismaService } from '@server/prisma/prisma.service';
 import { statusMap } from '@server/constants';
 import { RagService } from '@server/rag/rag.service';
 import { AuthService } from '@server/auth/auth.service';
+import { randomUUID } from 'crypto';
+
+const sourceSchema = z.object({
+  title: z.string(),
+  source: z.string(),
+  category: z.string(),
+  url: z.string(),
+  publishedAt: z.number(),
+  score: z.number(),
+  excerpt: z.string(),
+});
+
+const knowledgeMessageInputSchema = z.object({
+  role: z.enum(['user', 'assistant']),
+  content: z.string().min(1).max(20000),
+  sources: z.array(sourceSchema).max(20).optional(),
+});
 
 @Injectable()
 export class TrpcRouter {
@@ -37,6 +54,34 @@ export class TrpcRouter {
       code: 'FORBIDDEN',
       message: 'Admin account required',
     });
+  }
+
+  private parseJsonArray<T>(value: string | null | undefined): T[] {
+    if (!value) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private formatKnowledgeConversation(conversation: any) {
+    return {
+      id: conversation.id,
+      title: conversation.title,
+      categories: this.parseJsonArray<string>(conversation.categories),
+      useKnowledgeBase: conversation.useKnowledgeBase,
+      updatedAt: conversation.updatedAt?.getTime?.() || Date.now(),
+      messages: (conversation.messages || []).map((message: any) => ({
+        role: message.role,
+        content: message.content,
+        sources: this.parseJsonArray(message.sources),
+      })),
+      sources: [],
+    };
   }
 
   private mergeUserFeed(userFeed: any) {
@@ -351,6 +396,18 @@ export class TrpcRouter {
           nextCursor,
         };
       }),
+    categories: this.trpcService.protectedProcedure.query(async ({ ctx }) => {
+      const userId = await this.getCurrentUserId(ctx);
+      const rows = await this.prismaService.userFeed.findMany({
+        where: { userId },
+        select: { category: true },
+        orderBy: { category: 'asc' },
+      });
+      const categories = rows
+        .map((row) => row.category?.trim())
+        .filter((category): category is string => Boolean(category));
+      return Array.from(new Set(categories));
+    }),
     byId: this.trpcService.protectedProcedure
       .input(z.string())
       .query(async ({ input: id, ctx }) => {
@@ -689,6 +746,179 @@ export class TrpcRouter {
   });
 
   ragRouter = this.trpcService.router({
+    conversations: this.trpcService.protectedProcedure.query(async ({ ctx }) => {
+      const userId = await this.getCurrentUserId(ctx);
+      const conversations =
+        await this.prismaService.knowledgeConversation.findMany({
+          where: { userId },
+          include: {
+            messages: {
+              orderBy: { sequence: 'asc' },
+            },
+          },
+          orderBy: { updatedAt: 'desc' },
+          take: 50,
+        });
+      return conversations.map((conversation) =>
+        this.formatKnowledgeConversation(conversation),
+      );
+    }),
+    createConversation: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            title: z.string().min(1).max(255).optional(),
+            categories: z.array(z.string().min(1)).max(30).default(['all']),
+            useKnowledgeBase: z.boolean().default(true),
+          })
+          .optional(),
+      )
+      .mutation(async ({ input, ctx }) => {
+        const userId = await this.getCurrentUserId(ctx);
+        const conversation =
+          await this.prismaService.knowledgeConversation.create({
+            data: {
+              id: randomUUID(),
+              userId,
+              title: input?.title || '新对话',
+              categories: JSON.stringify(input?.categories || ['all']),
+              useKnowledgeBase: input?.useKnowledgeBase ?? true,
+            },
+            include: { messages: true },
+          });
+        return this.formatKnowledgeConversation(conversation);
+      }),
+    updateConversation: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          id: z.string().min(1),
+          title: z.string().min(1).max(255).optional(),
+          categories: z.array(z.string().min(1)).max(30).optional(),
+          useKnowledgeBase: z.boolean().optional(),
+        }),
+      )
+      .mutation(async ({ input, ctx }) => {
+        const userId = await this.getCurrentUserId(ctx);
+        const data: any = {};
+        if (input.title !== undefined) {
+          data.title = input.title;
+        }
+        if (input.categories !== undefined) {
+          data.categories = JSON.stringify(input.categories);
+        }
+        if (input.useKnowledgeBase !== undefined) {
+          data.useKnowledgeBase = input.useKnowledgeBase;
+        }
+
+        const result =
+          await this.prismaService.knowledgeConversation.updateMany({
+            where: { id: input.id, userId },
+            data,
+          });
+        if (result.count < 1) {
+          throw new TRPCError({
+            code: 'NOT_FOUND',
+            message: `No conversation with id '${input.id}'`,
+          });
+        }
+        const conversation =
+          await this.prismaService.knowledgeConversation.findFirstOrThrow({
+            where: { id: input.id, userId },
+            include: { messages: { orderBy: { sequence: 'asc' } } },
+          });
+        return this.formatKnowledgeConversation(conversation);
+      }),
+    deleteConversation: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().min(1) }))
+      .mutation(async ({ input, ctx }) => {
+        const userId = await this.getCurrentUserId(ctx);
+        await this.prismaService.knowledgeConversation.deleteMany({
+          where: { id: input.id, userId },
+        });
+        return input.id;
+      }),
+    clearConversation: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().min(1) }))
+      .mutation(async ({ input, ctx }) => {
+        const userId = await this.getCurrentUserId(ctx);
+        const conversation =
+          await this.prismaService.knowledgeConversation.findFirst({
+            where: { id: input.id, userId },
+          });
+        if (!conversation) {
+          throw new TRPCError({
+            code: 'NOT_FOUND',
+            message: `No conversation with id '${input.id}'`,
+          });
+        }
+        await this.prismaService.knowledgeMessage.deleteMany({
+          where: { conversationId: input.id },
+        });
+        const updated =
+          await this.prismaService.knowledgeConversation.update({
+            where: { id: input.id },
+            data: { title: '新对话' },
+            include: { messages: true },
+          });
+        return this.formatKnowledgeConversation(updated);
+      }),
+    appendConversationMessages: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          conversationId: z.string().min(1),
+          title: z.string().min(1).max(255),
+          categories: z.array(z.string().min(1)).max(30),
+          useKnowledgeBase: z.boolean(),
+          messages: z.array(knowledgeMessageInputSchema).min(1).max(4),
+        }),
+      )
+      .mutation(async ({ input, ctx }) => {
+        const userId = await this.getCurrentUserId(ctx);
+        const conversation =
+          await this.prismaService.knowledgeConversation.findFirst({
+            where: { id: input.conversationId, userId },
+          });
+        if (!conversation) {
+          throw new TRPCError({
+            code: 'NOT_FOUND',
+            message: `No conversation with id '${input.conversationId}'`,
+          });
+        }
+        const latest = await this.prismaService.knowledgeMessage.findFirst({
+          where: { conversationId: input.conversationId },
+          orderBy: { sequence: 'desc' },
+          select: { sequence: true },
+        });
+        const startSequence = (latest?.sequence ?? -1) + 1;
+        await this.prismaService.$transaction([
+          ...input.messages.map((message, index) =>
+            this.prismaService.knowledgeMessage.create({
+              data: {
+                id: randomUUID(),
+                conversationId: input.conversationId,
+                role: message.role,
+                content: message.content,
+                sources: JSON.stringify(message.sources || []),
+                sequence: startSequence + index,
+              },
+            }),
+          ),
+          this.prismaService.knowledgeConversation.update({
+            where: { id: input.conversationId },
+            data: {
+              title: input.title,
+              categories: JSON.stringify(input.categories),
+              useKnowledgeBase: input.useKnowledgeBase,
+            },
+          }),
+        ]);
+        const updated =
+          await this.prismaService.knowledgeConversation.findFirstOrThrow({
+            where: { id: input.conversationId, userId },
+            include: { messages: { orderBy: { sequence: 'asc' } } },
+          });
+        return this.formatKnowledgeConversation(updated);
+      }),
     stats: this.trpcService.protectedProcedure.query(async ({ ctx }) => {
       const userId = await this.getCurrentUserId(ctx);
       return this.ragService.stats(userId);

@@ -146,19 +146,43 @@ export class AuthService {
   }
 
   async deleteUser(userId: string) {
-    const user = await this.prismaService.user.findUnique({
-      where: { id: userId },
+    return this.prismaService.$transaction(async (tx) => {
+      const user = await tx.user.findUnique({
+        where: { id: userId },
+      });
+
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      const accountBindings = await tx.accountUser.findMany({
+        where: { userId },
+        select: { accountId: true },
+      });
+      const accountIds = Array.from(
+        new Set(accountBindings.map((binding) => binding.accountId)),
+      );
+
+      await tx.user.delete({
+        where: { id: userId },
+      });
+
+      for (const accountId of accountIds) {
+        const remainingBindings = await tx.accountUser.count({
+          where: { accountId },
+        });
+        if (remainingBindings < 1) {
+          await tx.account.deleteMany({ where: { id: accountId } });
+        } else {
+          await tx.account.updateMany({
+            where: { id: accountId, userId },
+            data: { userId: null },
+          });
+        }
+      }
+
+      return this.toAuthUser(user);
     });
-
-    if (!user) {
-      throw new Error('User not found');
-    }
-
-    await this.prismaService.user.delete({
-      where: { id: userId },
-    });
-
-    return this.toAuthUser(user);
   }
 
   createSessionCookie(token: string, expiresAt: Date) {

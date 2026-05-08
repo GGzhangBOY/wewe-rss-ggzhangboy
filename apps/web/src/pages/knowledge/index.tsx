@@ -10,7 +10,6 @@ import {
   Link,
   Select,
   SelectItem,
-  Spinner,
   Switch,
   Textarea,
 } from '@nextui-org/react';
@@ -52,18 +51,6 @@ type CategoryOption = {
   count?: number;
 };
 
-const STORAGE_KEY = 'wewe-rss-knowledge-conversations';
-
-const createConversation = (): Conversation => ({
-  id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-  title: '新对话',
-  categories: ['all'],
-  useKnowledgeBase: true,
-  updatedAt: Date.now(),
-  messages: [],
-  sources: [],
-});
-
 const normalizeConversationCategories = (
   categories?: string[],
   legacyCategory?: string,
@@ -75,6 +62,19 @@ const normalizeConversationCategories = (
   const withoutAll = selected.filter((item) => item !== 'all');
   return withoutAll.length ? Array.from(new Set(withoutAll)) : ['all'];
 };
+
+const normalizeDbConversation = (conversation: any): Conversation => ({
+  id: conversation.id,
+  title: conversation.title || '新对话',
+  categories: normalizeConversationCategories(
+    conversation.categories,
+    conversation.category,
+  ),
+  useKnowledgeBase: conversation.useKnowledgeBase ?? true,
+  updatedAt: conversation.updatedAt || Date.now(),
+  messages: conversation.messages || [],
+  sources: [],
+});
 
 const renderMessageContent = (content: string, sources?: Source[]) => {
   if (!sources?.length) {
@@ -121,65 +121,88 @@ const Knowledge = () => {
   const [question, setQuestion] = useState('');
   const [selectedCategories, setSelectedCategories] = useState<string[]>(['all']);
   const [useKnowledgeBase, setUseKnowledgeBase] = useState(true);
-  const [conversations, setConversations] = useState<Conversation[]>([
-    createConversation(),
-  ]);
-  const [activeId, setActiveId] = useState(conversations[0].id);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeId, setActiveId] = useState('');
+  const [hasRequestedInitialConversation, setHasRequestedInitialConversation] =
+    useState(false);
 
   const { data: feedData } = trpc.feed.list.useQuery({});
   const { data: stats } = trpc.rag.stats.useQuery();
+  const { data: savedConversations, isLoading: isLoadingConversations } =
+    trpc.rag.conversations.useQuery();
   const { mutateAsync: ask, isLoading: isAsking } = trpc.rag.ask.useMutation();
+  const {
+    mutateAsync: createConversation,
+    isLoading: isCreatingConversation,
+  } = trpc.rag.createConversation.useMutation();
+  const { mutateAsync: saveConversationSettings } =
+    trpc.rag.updateConversation.useMutation();
+  const { mutateAsync: deleteConversation } =
+    trpc.rag.deleteConversation.useMutation();
+  const { mutateAsync: clearConversation } =
+    trpc.rag.clearConversation.useMutation();
+  const { mutateAsync: appendConversationMessages } =
+    trpc.rag.appendConversationMessages.useMutation();
 
   useEffect(() => {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (!stored) {
+    if (!savedConversations) {
       return;
     }
-    try {
-      const parsed = JSON.parse(stored) as Conversation[];
-      const normalized = parsed.map((conversation) => {
-        const messages = conversation.messages || [];
-        return {
-          ...conversation,
-          categories: normalizeConversationCategories(
-            conversation.categories,
-            conversation.category,
-          ),
-          useKnowledgeBase: conversation.useKnowledgeBase ?? true,
-          messages: messages.map((message, index) => {
-            const isLastAssistant =
-              index === messages.length - 1 && message.role === 'assistant';
-            if (
-              isLastAssistant &&
-              !message.sources?.length &&
-              conversation.sources?.length
-            ) {
-              return { ...message, sources: conversation.sources };
-            }
-            return message;
-          }),
-          sources: [],
-        };
-      });
-      if (normalized.length) {
-        setConversations(normalized);
-        setActiveId(normalized[0].id);
-        setSelectedCategories(
-          normalizeConversationCategories(
-            normalized[0].categories,
-            normalized[0].category,
-          ),
-        );
-        setUseKnowledgeBase(normalized[0].useKnowledgeBase ?? true);
+
+    const normalized = savedConversations.map(normalizeDbConversation);
+    setConversations(normalized);
+
+    setActiveId((currentActiveId) => {
+      const nextActive =
+        normalized.find(
+          (conversation) => conversation.id === currentActiveId,
+        ) || normalized[0];
+      if (!nextActive) {
+        return currentActiveId;
       }
-    } catch {
-      localStorage.removeItem(STORAGE_KEY);
-    }
-  }, []);
+      setSelectedCategories(
+        normalizeConversationCategories(
+          nextActive.categories,
+          nextActive.category,
+        ),
+      );
+      setUseKnowledgeBase(nextActive.useKnowledgeBase ?? true);
+      return nextActive.id;
+    });
+  }, [savedConversations]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations.slice(0, 30)));
-  }, [conversations]);
+    if (
+      isLoadingConversations ||
+      hasRequestedInitialConversation ||
+      (savedConversations && savedConversations.length > 0)
+    ) {
+      return;
+    }
+
+    setHasRequestedInitialConversation(true);
+    createConversation({
+      categories: ['all'],
+      useKnowledgeBase: true,
+    })
+      .then((conversation) => {
+        const next = normalizeDbConversation(conversation);
+        setConversations([next]);
+        setActiveId(next.id);
+        setSelectedCategories(
+          normalizeConversationCategories(next.categories),
+        );
+        setUseKnowledgeBase(next.useKnowledgeBase ?? true);
+      })
+      .catch(() => {
+        toast.error('创建对话失败');
+      });
+  }, [
+    createConversation,
+    hasRequestedInitialConversation,
+    isLoadingConversations,
+    savedConversations,
+  ]);
 
   const activeConversation =
     conversations.find((item) => item.id === activeId) || conversations[0];
@@ -224,21 +247,8 @@ const Knowledge = () => {
     );
   };
 
-  const handleNewConversation = () => {
-    const next = createConversation();
-    setConversations((items) => [next, ...items]);
-    setActiveId(next.id);
-    setSelectedCategories(['all']);
-    setUseKnowledgeBase(true);
-    setQuestion('');
-  };
-
-  const handleSelectConversation = (id: string) => {
-    const conversation = conversations.find((item) => item.id === id);
-    if (!conversation) {
-      return;
-    }
-    setActiveId(id);
+  const applyActiveConversation = (conversation: Conversation) => {
+    setActiveId(conversation.id);
     setSelectedCategories(
       normalizeConversationCategories(
         conversation.categories,
@@ -249,6 +259,38 @@ const Knowledge = () => {
     setQuestion('');
   };
 
+  const addOrReplaceConversation = (conversation: Conversation) => {
+    setConversations((items) => {
+      const existing = items.some((item) => item.id === conversation.id);
+      const next = existing
+        ? items.map((item) => (item.id === conversation.id ? conversation : item))
+        : [conversation, ...items];
+      return next.sort((a, b) => b.updatedAt - a.updatedAt);
+    });
+  };
+
+  const handleNewConversation = async () => {
+    try {
+      const next = await createConversation({
+        categories: ['all'],
+        useKnowledgeBase: true,
+      });
+      const normalized = normalizeDbConversation(next);
+      addOrReplaceConversation(normalized);
+      applyActiveConversation(normalized);
+    } catch {
+      toast.error('创建对话失败');
+    }
+  };
+
+  const handleSelectConversation = (id: string) => {
+    const conversation = conversations.find((item) => item.id === id);
+    if (!conversation) {
+      return;
+    }
+    applyActiveConversation(conversation);
+  };
+
   const handleCategoryChange = (nextCategories: string[]) => {
     const normalized = normalizeConversationCategories(nextCategories);
     setSelectedCategories(normalized);
@@ -257,42 +299,54 @@ const Knowledge = () => {
       categories: normalized,
       updatedAt: Date.now(),
     }));
+    if (activeId) {
+      saveConversationSettings({
+        id: activeId,
+        categories: normalized,
+      }).catch(() => {
+        toast.error('保存分类失败');
+      });
+    }
   };
 
-  const handleClearConversation = () => {
-    updateConversation(activeId, (conversation) => ({
-      ...conversation,
-      title: '新对话',
-      updatedAt: Date.now(),
-      messages: [],
-      sources: [],
-    }));
-  };
-
-  const handleDeleteConversation = (id: string) => {
-    const nextConversations = conversations.filter((item) => item.id !== id);
-    if (!nextConversations.length) {
-      const next = createConversation();
-      setConversations([next]);
-      setActiveId(next.id);
-      setSelectedCategories(['all']);
-      setUseKnowledgeBase(true);
-      setQuestion('');
-      toast.success('对话已删除');
+  const handleClearConversation = async () => {
+    if (!activeId) {
       return;
     }
-
-    setConversations(nextConversations);
-    if (id === activeId) {
-      const next = nextConversations[0];
-      setActiveId(next.id);
-      setSelectedCategories(
-        normalizeConversationCategories(next.categories, next.category),
-      );
-      setUseKnowledgeBase(next.useKnowledgeBase ?? true);
-      setQuestion('');
+    try {
+      const cleared = await clearConversation({ id: activeId });
+      const normalized = normalizeDbConversation(cleared);
+      addOrReplaceConversation(normalized);
+      applyActiveConversation(normalized);
+    } catch {
+      toast.error('清空对话失败');
     }
-    toast.success('对话已删除');
+  };
+
+  const handleDeleteConversation = async (id: string) => {
+    try {
+      await deleteConversation({ id });
+      const nextConversations = conversations.filter((item) => item.id !== id);
+      if (!nextConversations.length) {
+        const next = await createConversation({
+          categories: ['all'],
+          useKnowledgeBase: true,
+        });
+        const normalized = normalizeDbConversation(next);
+        setConversations([normalized]);
+        applyActiveConversation(normalized);
+        toast.success('对话已删除');
+        return;
+      }
+
+      setConversations(nextConversations);
+      if (id === activeId) {
+        applyActiveConversation(nextConversations[0]);
+      }
+      toast.success('对话已删除');
+    } catch {
+      toast.error('删除对话失败');
+    }
   };
 
   const handleKnowledgeBaseChange = (selected: boolean) => {
@@ -308,6 +362,14 @@ const Knowledge = () => {
           : item,
       ),
     );
+    if (activeId) {
+      saveConversationSettings({
+        id: activeId,
+        useKnowledgeBase: selected,
+      }).catch(() => {
+        toast.error('保存知识库开关失败');
+      });
+    }
   };
 
   const handleAsk = async () => {
@@ -316,48 +378,66 @@ const Knowledge = () => {
       toast.error('请输入问题');
       return;
     }
+    if (!activeConversation) {
+      toast.error('对话还未创建完成');
+      return;
+    }
 
     const history = activeConversation.messages.slice(-12);
     const nextCategories = effectiveCategories;
     const nextUseKnowledgeBase = useKnowledgeBase;
+    const nextTitle = activeConversation.messages.length
+      ? activeConversation.title
+      : text.slice(0, 28);
+    const userMessage: ChatMessage = { role: 'user', content: text };
     updateConversation(activeId, (conversation) => ({
       ...conversation,
-      title: conversation.messages.length ? conversation.title : text.slice(0, 28),
+      title: nextTitle,
       categories: nextCategories,
       useKnowledgeBase: nextUseKnowledgeBase,
       updatedAt: Date.now(),
-      messages: [
-        ...conversation.messages,
-        { role: 'user', content: text },
-      ],
+      messages: [...conversation.messages, userMessage],
       sources: [],
     }));
     setQuestion('');
 
-    const result = await ask({
-      question: text,
-      categories:
-        nextUseKnowledgeBase && nextCategories[0] !== 'all'
-          ? nextCategories
-          : undefined,
-      limit: 8,
-      useKnowledgeBase: nextUseKnowledgeBase,
-      history,
-    });
+    try {
+      const result = await ask({
+        question: text,
+        categories:
+          nextUseKnowledgeBase && nextCategories[0] !== 'all'
+            ? nextCategories
+            : undefined,
+        limit: 8,
+        useKnowledgeBase: nextUseKnowledgeBase,
+        history,
+      });
+      const assistantMessage: ChatMessage = {
+        role: 'assistant',
+        content: result.answer,
+        sources: nextUseKnowledgeBase ? result.sources : [],
+      };
 
-    updateConversation(activeId, (conversation) => ({
-      ...conversation,
-      updatedAt: Date.now(),
-      messages: [
-        ...conversation.messages,
-        {
-          role: 'assistant',
-          content: result.answer,
-          sources: nextUseKnowledgeBase ? result.sources : [],
-        },
-      ],
-      sources: [],
-    }));
+      updateConversation(activeId, (conversation) => ({
+        ...conversation,
+        updatedAt: Date.now(),
+        messages: [...conversation.messages, assistantMessage],
+        sources: [],
+      }));
+
+      const saved = await appendConversationMessages({
+        conversationId: activeId,
+        title: nextTitle,
+        categories: nextCategories,
+        useKnowledgeBase: nextUseKnowledgeBase,
+        messages: [userMessage, assistantMessage],
+      });
+      const normalized = normalizeDbConversation(saved);
+      addOrReplaceConversation(normalized);
+      applyActiveConversation(normalized);
+    } catch {
+      toast.error('提问失败');
+    }
   };
 
   return (
@@ -366,7 +446,7 @@ const Knowledge = () => {
         <div>
           <h2 className="text-xl font-semibold">知识问答</h2>
           <p className="text-sm text-default-500">
-            基于已索引的公众号内容进行多轮问答，回答会保留当前浏览器的历史对话。
+            基于已索引的公众号内容进行多轮问答，历史对话会按当前账号保存。
           </p>
         </div>
         <Chip color="primary" variant="flat">
@@ -378,12 +458,22 @@ const Knowledge = () => {
         <Card radius="sm">
           <CardHeader className="flex items-center justify-between">
             <span className="font-medium">历史对话</span>
-            <Button size="sm" variant="flat" onPress={handleNewConversation}>
+            <Button
+              isDisabled={isCreatingConversation}
+              size="sm"
+              variant="flat"
+              onPress={handleNewConversation}
+            >
               新建
             </Button>
           </CardHeader>
           <Divider />
           <CardBody className="gap-2">
+            {isLoadingConversations && (
+              <div className="rounded-small bg-default-100 p-3 text-sm text-default-500">
+                正在加载对话...
+              </div>
+            )}
             {conversations.map((conversation) => (
               <div
                 className={`flex items-start gap-2 rounded-small p-2 text-sm transition ${
@@ -451,7 +541,12 @@ const Knowledge = () => {
                   </SelectItem>
                 ))}
               </Select>
-              <Button size="sm" variant="flat" onPress={handleClearConversation}>
+              <Button
+                isDisabled={!activeConversation}
+                size="sm"
+                variant="flat"
+                onPress={handleClearConversation}
+              >
                 清空
               </Button>
             </div>
@@ -459,12 +554,12 @@ const Knowledge = () => {
           <Divider />
           <CardBody className="gap-4">
             <div className="min-h-[360px] space-y-4">
-              {!activeConversation.messages.length && (
+              {!activeConversation?.messages.length && (
                 <div className="rounded-small bg-default-100 p-4 text-sm text-default-500">
                   输入问题开始对话。后续追问会带上最近几轮上下文。
                 </div>
               )}
-              {activeConversation.messages.map((message, index) => (
+              {activeConversation?.messages.map((message, index) => (
                 <div
                   className={`flex ${
                     message.role === 'user' ? 'justify-end' : 'justify-start'
@@ -554,7 +649,7 @@ const Knowledge = () => {
               </Switch>
               <Button
                 color="primary"
-                isDisabled={isAsking}
+                isDisabled={isAsking || !activeConversation}
                 isLoading={isAsking}
                 onPress={handleAsk}
               >

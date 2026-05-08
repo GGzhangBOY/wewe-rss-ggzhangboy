@@ -37,6 +37,10 @@ const Feeds = () => {
       refetchOnWindowFocus: true,
     },
   );
+  const { refetch: refetchFeedCategories, data: feedCategories = [] } =
+    trpc.feed.categories.useQuery(undefined, {
+      refetchOnWindowFocus: true,
+    });
 
   const navigate = useNavigate();
 
@@ -78,31 +82,38 @@ const Feeds = () => {
     console.log('wxsLink', wxsLink);
     // TODO show operation in progress
     const wxsLinks = wxsLink.split('\n').filter((link) => link.trim() !== '');
-    for (const link of wxsLinks) {
-      console.log('add wxsLink', link);
-      const res = await getMpInfo({ wxsLink: link });
-      if (res[0]) {
-        const item = res[0];
-        await addFeed({
-          id: item.id,
-          mpName: item.name,
-          mpCover: item.cover,
-          mpIntro: item.intro,
-          updateTime: item.updateTime,
-          status: 1,
-        });
-        await refreshMpArticles({ mpId: item.id });
-        toast.success('添加成功', {
-          description: `公众号 ${item.name}`,
-        });
-        await queryUtils.article.list.reset();
-      } else {
-        toast.error('添加失败', { description: '请检查链接是否正确' });
+    try {
+      for (const link of wxsLinks) {
+        console.log('add wxsLink', link);
+        const res = await getMpInfo({ wxsLink: link });
+        if (res[0]) {
+          const item = res[0];
+          await addFeed({
+            id: item.id,
+            mpName: item.name,
+            mpCover: item.cover,
+            mpIntro: item.intro,
+            updateTime: item.updateTime,
+            status: 1,
+          });
+          await refreshMpArticles({ mpId: item.id });
+          toast.success('添加成功', {
+            description: `公众号 ${item.name}`,
+          });
+          await queryUtils.article.list.reset();
+        } else {
+          toast.error('添加失败', { description: '请检查链接是否正确' });
+        }
       }
+      refetchFeedList();
+      setWxsLink('');
+      onClose();
+    } catch (error: any) {
+      toast.error('添加失败', {
+        description:
+          error?.message || '请先确认读书账号可用，并检查链接是否正确',
+      });
     }
-    refetchFeedList();
-    setWxsLink('');
-    onClose();
   };
 
   const isActive = (key: string) => {
@@ -115,9 +126,20 @@ const Feeds = () => {
 
   const categoryOptions = useMemo(() => {
     const set = new Set<string>();
-    (feedData?.items || []).forEach((item) => set.add(item.category || '未分类'));
+    feedCategories.forEach((category) => {
+      const normalized = category.trim();
+      if (normalized) {
+        set.add(normalized);
+      }
+    });
+    (feedData?.items || []).forEach((item) => {
+      const normalized = item.category?.trim();
+      if (normalized) {
+        set.add(normalized);
+      }
+    });
     return ['all', ...Array.from(set)];
-  }, [feedData?.items]);
+  }, [feedCategories, feedData?.items]);
 
   const filteredFeedItems = useMemo(() => {
     if (!feedData?.items) return [];
@@ -137,6 +159,7 @@ const Feeds = () => {
     });
     toast.success('分类已更新');
     await refetchFeedList();
+    await refetchFeedCategories();
   };
 
   const handleExportOpml = async (ev) => {
@@ -212,20 +235,10 @@ const Feeds = () => {
               onAction={(key) => {
                 const nextId = key as string;
                 setCurrentMpId(nextId);
-                navigate(nextId ? `/feeds/${nextId}` : '/feeds');
+                navigate(`/feeds/${nextId}`);
               }}
             >
-              <ListboxSection showDivider>
-                <ListboxItem
-                  key={''}
-                  className={isActive('') ? 'bg-primary-50 text-primary' : ''}
-                  startContent={<Avatar name="ALL"></Avatar>}
-                >
-                  全部
-                </ListboxItem>
-              </ListboxSection>
-
-              <ListboxSection className="overflow-y-auto h-[calc(100vh-260px)]">
+              <ListboxSection className="overflow-y-auto h-[calc(100vh-210px)]">
                 {filteredFeedItems.map((item) => {
                   return (
                     <ListboxItem

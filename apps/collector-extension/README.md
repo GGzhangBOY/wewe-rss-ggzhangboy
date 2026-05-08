@@ -48,7 +48,7 @@ dist/wewe-rss-content-collector.zip
 
 ## Configuration
 
-- Server URL: WeWe RSS server address, for example `http://47.121.26.65:4000`.
+- Server URL: WeWe RSS server address, for example `http://your-server:4000`.
 - Auth Code: backend authorization code.
 - Collector ID: generated automatically, can be changed manually.
 - Interval: 1-5 seconds between article tabs.

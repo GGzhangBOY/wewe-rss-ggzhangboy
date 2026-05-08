@@ -146,7 +146,7 @@ export class TrpcService {
         });
 
     if (!accounts || accounts.length === 0) {
-      throw new Error('鏆傛棤鍙敤璇讳功璐﹀彿!');
+      throw new Error('当前账号未配置可用的读书账号，请先进入账号管理添加读书账号。');
     }
 
     return accounts[Math.floor(Math.random() * accounts.length)];

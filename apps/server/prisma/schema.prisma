@@ -35,6 +35,7 @@ model User {
   accounts AccountUser[]
   feeds    UserFeed[]
   sessions Session[]
+  conversations KnowledgeConversation[]
 
   @@map("users")
 }
@@ -51,6 +52,39 @@ model Session {
   @@index([userId])
   @@index([expiresAt])
   @@map("sessions")
+}
+
+model KnowledgeConversation {
+  id               String    @id @db.VarChar(36)
+  userId           String    @map("user_id") @db.VarChar(36)
+  title            String    @map("title") @db.VarChar(255)
+  categories       String    @map("categories") @db.Text()
+  useKnowledgeBase Boolean   @default(true) @map("use_knowledge_base")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime? @default(now()) @updatedAt @map("updated_at")
+
+  user     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages KnowledgeMessage[]
+
+  @@index([userId])
+  @@index([updatedAt])
+  @@map("knowledge_conversations")
+}
+
+model KnowledgeMessage {
+  id             String   @id @db.VarChar(36)
+  conversationId String   @map("conversation_id") @db.VarChar(36)
+  role           String   @map("role") @db.VarChar(32)
+  content        String   @map("content") @db.Text()
+  sources        String   @map("sources") @db.Text()
+  sequence       Int      @map("sequence") @db.Int()
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  conversation KnowledgeConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+  @@index([sequence])
+  @@map("knowledge_messages")
 }
 
 model AccountUser {
